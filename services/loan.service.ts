@@ -1,0 +1,532 @@
+import "server-only";
+import type { Prisma, Loan, LoanAmortizationSchedule } from "@prisma/client";
+import { prisma } from "@/lib/db";
+import { parseOrThrow } from "@/lib/api";
+import { audit, AuditAction } from "@/lib/audit";
+import { AppError, NotFoundError } from "@/lib/errors";
+import type { RequestMeta } from "@/lib/security/request";
+import { Decimal, roundMoney, sum, toDecimal, percentOf } from "@/lib/money";
+import {
+  MONTHS_PER_PERIOD,
+  calculateEmi,
+  emiForInstallments,
+  generateAmortizationSchedule,
+  nextInstallmentDate,
+  projectRemainingSchedule,
+  type Frequency,
+} from "@/lib/finance/amortization";
+import { todayInTimezone, DEFAULT_TIMEZONE } from "@/lib/dates";
+import { emiPreviewSchema, loanDetailsSchema, loanPaymentSchema, loanSchema, rateRevisionSchema } from "@/validators/loans";
+import { assertAccountRef } from "@/services/account.service";
+import { createTransactionWithin, deleteTransactionWithin } from "@/services/transaction.service";
+
+const NO_META: RequestMeta = { ip: null, userAgent: null };
+type Tx = Prisma.TransactionClient;
+
+const LOAN_SUBCATEGORY: Record<string, string> = { HOME: "Home Loan", CAR: "Car Loan", PERSONAL: "Personal Loan", EDUCATION: "Education Loan", OTHER: "Personal Loan" };
+
+// ───────────────────────────── helpers ─────────────────────────────
+
+async function ownedLoan(db: Tx | typeof prisma, userId: string, id: string) {
+  const loan = await db.loan.findFirst({ where: { id, userId, deletedAt: null } });
+  if (!loan) throw new NotFoundError("Loan not found.");
+  return loan;
+}
+
+async function lockLoan(tx: Tx, loanId: string) {
+  await tx.$queryRaw`SELECT id FROM "loans" WHERE id = ${loanId} FOR UPDATE`;
+}
+
+/** Re-derive paid totals / outstanding / status from the payment records (never incremented). */
+async function syncLoanTotals(tx: Tx, loanId: string) {
+  const loan = await tx.loan.findUniqueOrThrow({ where: { id: loanId } });
+  const payments = await tx.loanPayment.findMany({ where: { loanId, deletedAt: null }, orderBy: { paymentDate: "asc" } });
+  const principalPaid = roundMoney(sum(payments.map((p) => p.principalComponent)));
+  const interestPaid = roundMoney(sum(payments.map((p) => p.interestComponent)));
+  const totalPrepayments = roundMoney(sum(payments.filter((p) => p.paymentType === "PREPAYMENT").map((p) => p.principalComponent)));
+  const outstanding = Decimal.max(loan.originalPrincipal.minus(principalPaid), 0);
+  const foreclosure = payments.find((p) => p.paymentType === "FORECLOSURE");
+  const status = foreclosure ? "FORECLOSED" : outstanding.isZero() ? "CLOSED" : "ACTIVE";
+  const closureDate = status === "ACTIVE" ? null : (foreclosure?.paymentDate ?? payments[payments.length - 1]?.paymentDate ?? null);
+  return tx.loan.update({ where: { id: loanId }, data: { principalPaid, interestPaid, totalPrepayments, outstandingPrincipal: roundMoney(outstanding), status, closureDate } });
+}
+
+/** Replace all not-yet-paid instalments with a fresh projection from the current outstanding. */
+async function rebuildFutureSchedule(tx: Tx, loan: Loan) {
+  // Keep every row up to the last instalment that has a payment — an unpaid row
+  // before it stays as overdue. Only rows after it are re-projected.
+  const lastPaidRow = await tx.loanAmortizationSchedule.findFirst({
+    where: { loanId: loan.id, payments: { some: { deletedAt: null } } },
+    orderBy: { installmentNumber: "desc" },
+    select: { installmentNumber: true },
+  });
+  const lastPaid = lastPaidRow?.installmentNumber ?? 0;
+  await tx.loanAmortizationSchedule.deleteMany({
+    where: { loanId: loan.id, installmentNumber: { gt: lastPaid }, status: { in: ["UPCOMING", "MISSED"] }, payments: { none: { deletedAt: null } } },
+  });
+  if (loan.status !== "ACTIVE" || loan.outstandingPrincipal.lessThanOrEqualTo(0)) return;
+  const last = await tx.loanAmortizationSchedule.findFirst({ where: { loanId: loan.id }, orderBy: { installmentNumber: "desc" } });
+  // Principal already scheduled in kept-but-unpaid (overdue) rows isn't projected again.
+  const overdue = await tx.loanAmortizationSchedule.aggregate({
+    where: { loanId: loan.id, installmentNumber: { lte: lastPaid }, payments: { none: { deletedAt: null } } },
+    _sum: { principalComponent: true },
+  });
+  const toProject = loan.outstandingPrincipal.minus(toDecimal(overdue._sum.principalComponent ?? 0));
+  if (toProject.lessThanOrEqualTo(0)) return;
+  const frequency = loan.emiFrequency as Frequency;
+  const nextDue = last ? nextInstallmentDate(last.dueDate, frequency, loan.emiDueDay) : loan.firstEmiDate;
+  const rows = projectRemainingSchedule({
+    outstanding: toProject,
+    annualRatePct: loan.interestRate,
+    frequency,
+    emi: loan.emiAmount,
+    nextDueDate: nextDue,
+    startInstallment: (last?.installmentNumber ?? 0) + 1,
+    anchorDay: loan.emiDueDay,
+  });
+  await tx.loanAmortizationSchedule.createMany({
+    data: rows.map((r) => ({
+      loanId: loan.id,
+      installmentNumber: r.installmentNumber,
+      dueDate: r.dueDate,
+      openingPrincipal: r.openingPrincipal,
+      emiAmount: r.emi,
+      principalComponent: r.principal,
+      interestComponent: r.interest,
+      closingPrincipal: r.closingPrincipal,
+      status: "UPCOMING",
+    })),
+  });
+}
+
+async function emiCategory(tx: Tx, loanType: string, isCharge: boolean) {
+  const catName = isCharge ? "Fees & Charges" : "EMI";
+  const subName = isCharge ? "Late Fees" : LOAN_SUBCATEGORY[loanType];
+  const cat = await tx.category.findFirst({ where: { userId: null, name: catName, kind: "EXPENSE", deletedAt: null }, include: { subCategories: { where: { name: subName } } } });
+  return { categoryId: cat?.id ?? null, subCategoryId: cat?.subCategories[0]?.id ?? null };
+}
+
+// ───────────────────────────── preview / create ─────────────────────────────
+
+export function previewEmi(input: unknown) {
+  const d = parseOrThrow(emiPreviewSchema, input);
+  const emi = calculateEmi(d.principal, d.interestRate, d.tenureMonths, d.emiFrequency, d.roundEmiToRupee);
+  const n = d.tenureMonths / MONTHS_PER_PERIOD[d.emiFrequency];
+  const rows = generateAmortizationSchedule({ principal: d.principal, annualRatePct: d.interestRate, tenureMonths: d.tenureMonths, frequency: d.emiFrequency, firstDueDate: new Date(Date.UTC(2000, 0, 1)), emi });
+  const totalInterest = roundMoney(sum(rows.map((r) => r.interest)));
+  return { emi: emi.toFixed(2), installments: n, totalInterest: totalInterest.toFixed(2), totalPayment: roundMoney(toDecimal(d.principal).plus(totalInterest)).toFixed(2) };
+}
+
+export async function createLoan(userId: string, input: unknown, meta: RequestMeta = NO_META, timezone = DEFAULT_TIMEZONE) {
+  const d = parseOrThrow(loanSchema, input);
+  if (d.repaymentAccountId) await assertAccountRef(prisma, userId, { kind: "bank", id: d.repaymentAccountId });
+  const frequency = d.emiFrequency as Frequency;
+  let rows;
+  try {
+    rows = generateAmortizationSchedule({
+      principal: d.principal,
+      annualRatePct: d.interestRate,
+      tenureMonths: d.tenureMonths,
+      frequency,
+      firstDueDate: d.firstEmiDate,
+      emi: d.emiAmount ?? undefined,
+      roundEmiToRupee: d.roundEmiToRupee,
+    });
+  } catch (e) {
+    throw new AppError((e as Error).message, 400, "INVALID_LOAN_TERMS", { emiAmount: [(e as Error).message] });
+  }
+  const emi = rows[0].emi;
+  const today = todayInTimezone(timezone);
+
+  return prisma.$transaction(async (tx) => {
+    const loan = await tx.loan.create({
+      data: {
+        userId,
+        name: d.name,
+        lender: d.lender,
+        loanType: d.loanType,
+        accountLast4: d.accountLast4,
+        originalPrincipal: roundMoney(d.principal),
+        interestRate: toDecimal(d.interestRate),
+        interestType: d.interestType,
+        startDate: d.startDate,
+        firstEmiDate: d.firstEmiDate,
+        tenureMonths: d.tenureMonths,
+        emiAmount: emi,
+        emiFrequency: frequency,
+        emiDueDay: d.firstEmiDate.getUTCDate(),
+        outstandingPrincipal: roundMoney(d.principal),
+        repaymentAccountId: d.repaymentAccountId,
+        notes: d.notes,
+      },
+    });
+    await tx.loanAmortizationSchedule.createMany({
+      data: rows.map((r) => ({
+        loanId: loan.id,
+        installmentNumber: r.installmentNumber,
+        dueDate: r.dueDate,
+        openingPrincipal: r.openingPrincipal,
+        emiAmount: r.emi,
+        principalComponent: r.principal,
+        interestComponent: r.interest,
+        closingPrincipal: r.closingPrincipal,
+        status: d.markPastAsPaid && r.dueDate < today ? "PAID" : "UPCOMING",
+      })),
+    });
+    if (d.markPastAsPaid) {
+      const paid = await tx.loanAmortizationSchedule.findMany({ where: { loanId: loan.id, status: "PAID" } });
+      if (paid.length) {
+        await tx.loanPayment.createMany({
+          data: paid.map((r) => ({
+            loanId: loan.id,
+            scheduleId: r.id,
+            paymentDate: r.dueDate,
+            paymentType: "EMI" as const,
+            amount: r.emiAmount,
+            principalComponent: r.principalComponent,
+            interestComponent: r.interestComponent,
+            notes: "Marked as paid when the loan was added",
+          })),
+        });
+      }
+      await syncLoanTotals(tx, loan.id);
+    }
+    await audit({ userId, action: AuditAction.LOAN_CREATED, entityType: "Loan", entityId: loan.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { loanType: d.loanType, markPastAsPaid: d.markPastAsPaid } }, tx);
+    return tx.loan.findUniqueOrThrow({ where: { id: loan.id } });
+  });
+}
+
+export async function updateLoanDetails(userId: string, id: string, input: unknown, meta: RequestMeta = NO_META) {
+  await ownedLoan(prisma, userId, id);
+  const d = parseOrThrow(loanDetailsSchema, input);
+  if (d.repaymentAccountId) await assertAccountRef(prisma, userId, { kind: "bank", id: d.repaymentAccountId });
+  const loan = await prisma.loan.update({ where: { id }, data: { name: d.name, lender: d.lender, accountLast4: d.accountLast4, interestType: d.interestType, repaymentAccountId: d.repaymentAccountId, notes: d.notes } });
+  await audit({ userId, action: AuditAction.LOAN_UPDATED, entityType: "Loan", entityId: id, ip: meta.ip, userAgent: meta.userAgent });
+  return loan;
+}
+
+/** Soft delete. Ledger entries of its payments are kept (they are real money movements). */
+export async function deleteLoan(userId: string, id: string, meta: RequestMeta = NO_META) {
+  await ownedLoan(prisma, userId, id);
+  await prisma.loan.update({ where: { id }, data: { deletedAt: new Date() } });
+  await audit({ userId, action: AuditAction.LOAN_DELETED, entityType: "Loan", entityId: id, ip: meta.ip, userAgent: meta.userAgent });
+}
+
+// ───────────────────────────── payments ─────────────────────────────
+
+/**
+ * Record an actual payment against the loan.
+ *  • EMI — pays the next unpaid instalment (or the one chosen). Interest due on
+ *    that instalment is paid first; the rest reduces principal. Short or extra
+ *    payments re-project the remaining schedule (EMI kept, tenure adjusts).
+ *  • PREPAYMENT — all principal; then either shorten tenure or lower the EMI.
+ *  • FORECLOSURE — clears the outstanding; anything above it is charges/interest.
+ *  • CHARGE — penalty/late fee; doesn't change principal.
+ * Optionally writes the matching ledger transaction (EMI / Fee) from a bank or cash account.
+ */
+export async function recordLoanPayment(userId: string, loanId: string, input: unknown, meta: RequestMeta = NO_META) {
+  const d = parseOrThrow(loanPaymentSchema, input);
+  return prisma.$transaction(async (tx) => {
+    await lockLoan(tx, loanId);
+    let loan = await ownedLoan(tx, userId, loanId);
+    if (d.paymentType !== "CHARGE" && loan.status !== "ACTIVE") throw new AppError("This loan is already closed.", 409, "LOAN_CLOSED");
+    const amount = roundMoney(d.amount);
+    const outstanding = loan.outstandingPrincipal;
+    let principal = new Decimal(0);
+    let interest = new Decimal(0);
+    let charges = new Decimal(0);
+    let row: LoanAmortizationSchedule | null = null;
+
+    if (d.paymentType === "EMI") {
+      row = d.scheduleId
+        ? await tx.loanAmortizationSchedule.findFirst({ where: { id: d.scheduleId, loanId, status: { in: ["UPCOMING", "PARTIALLY_PAID", "MISSED"] } } })
+        : await tx.loanAmortizationSchedule.findFirst({ where: { loanId, status: { in: ["UPCOMING", "PARTIALLY_PAID", "MISSED"] } }, orderBy: { installmentNumber: "asc" } });
+      if (!row) throw new AppError("There is no unpaid instalment to apply this EMI to.", 409, "NO_INSTALMENT", { scheduleId: ["Choose an unpaid instalment"] });
+      const already = await tx.loanPayment.aggregate({ where: { scheduleId: row.id, deletedAt: null }, _sum: { interestComponent: true } });
+      const interestDue = Decimal.max(row.interestComponent.minus(already._sum.interestComponent ?? 0), 0);
+      interest = Decimal.min(amount, interestDue);
+      principal = amount.minus(interest);
+      if (principal.greaterThan(outstanding)) {
+        throw new AppError(`That's more than needed. ₹${outstanding.plus(interest).toFixed(2)} closes the loan — record it as a foreclosure.`, 400, "OVERPAYMENT", { amount: ["Amount exceeds what is owed"] });
+      }
+    } else if (d.paymentType === "PREPAYMENT") {
+      if (amount.greaterThanOrEqualTo(outstanding)) {
+        throw new AppError("A prepayment must be less than the outstanding principal. To close the loan, record a foreclosure.", 400, "OVERPAYMENT", { amount: [`Outstanding is ₹${outstanding.toFixed(2)}`] });
+      }
+      principal = amount;
+    } else if (d.paymentType === "FORECLOSURE") {
+      if (amount.lessThan(outstanding)) {
+        throw new AppError(`Foreclosure needs at least the outstanding principal (₹${outstanding.toFixed(2)}).`, 400, "UNDERPAYMENT", { amount: [`At least ₹${outstanding.toFixed(2)}`] });
+      }
+      principal = outstanding;
+      charges = amount.minus(outstanding);
+    } else {
+      charges = amount;
+    }
+
+    // Ledger entry (real money leaving a bank/cash account).
+    let transactionId: string | null = null;
+    if (d.recordInLedger) {
+      const ref = d.account!;
+      const cat = await emiCategory(tx, loan.loanType, d.paymentType === "CHARGE");
+      const label = { EMI: `EMI${row ? ` #${row.installmentNumber}` : ""}`, PREPAYMENT: "prepayment", FORECLOSURE: "foreclosure", CHARGE: "charges" }[d.paymentType];
+      const t = await createTransactionWithin(
+        tx,
+        userId,
+        {
+          kind: d.paymentType === "CHARGE" ? "FEE" : "EMI",
+          transactionDate: d.paymentDate.toISOString().slice(0, 10),
+          amount: amount.toFixed(2),
+          account: ref,
+          description: `${loan.lender} ${loan.name} ${label}`,
+          merchantName: loan.lender,
+          categoryId: cat.categoryId,
+          subCategoryId: cat.subCategoryId,
+          notes: d.notes,
+        },
+        meta,
+        { loanId },
+      );
+      transactionId = t.id;
+    }
+
+    const payment = await tx.loanPayment.create({
+      data: {
+        loanId,
+        scheduleId: row?.id ?? null,
+        transactionId,
+        paymentDate: d.paymentDate,
+        paymentType: d.paymentType,
+        amount,
+        principalComponent: roundMoney(principal),
+        interestComponent: roundMoney(interest),
+        chargesComponent: roundMoney(charges),
+        notes: d.notes,
+      },
+    });
+
+    if (row) {
+      const paidOnRow = await tx.loanPayment.aggregate({ where: { scheduleId: row.id, deletedAt: null }, _sum: { amount: true } });
+      const fullyPaid = toDecimal(paidOnRow._sum.amount).greaterThanOrEqualTo(row.emiAmount);
+      await tx.loanAmortizationSchedule.update({ where: { id: row.id }, data: { status: fullyPaid ? "PAID" : "PARTIALLY_PAID" } });
+    }
+
+    const remainingBefore = await tx.loanAmortizationSchedule.count({ where: { loanId, status: "UPCOMING" } });
+    loan = await syncLoanTotals(tx, loanId);
+    if (d.paymentType === "PREPAYMENT" && d.prepaymentMode === "REDUCE_EMI" && remainingBefore > 0) {
+      const newEmi = emiForInstallments(loan.outstandingPrincipal, loan.interestRate, remainingBefore, loan.emiFrequency as Frequency);
+      loan = await tx.loan.update({ where: { id: loanId }, data: { emiAmount: newEmi } });
+    }
+    if (d.paymentType !== "CHARGE") {
+      if (loan.status !== "ACTIVE") {
+        await tx.loanAmortizationSchedule.deleteMany({ where: { loanId, status: { in: ["UPCOMING", "MISSED"] }, payments: { none: {} } } });
+      } else {
+        // Re-project only if the payment changed the principal path (short/extra EMI or prepayment).
+        const scheduledPrincipal = row ? row.principalComponent : new Decimal(0);
+        if (d.paymentType === "PREPAYMENT" || !principal.equals(scheduledPrincipal)) await rebuildFutureSchedule(tx, loan);
+      }
+    }
+
+    await audit({ userId, action: AuditAction.LOAN_PAYMENT_RECORDED, entityType: "LoanPayment", entityId: payment.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { loanId, type: d.paymentType, ledger: Boolean(transactionId), mode: d.paymentType === "PREPAYMENT" ? d.prepaymentMode : undefined } }, tx);
+    return payment;
+  });
+}
+
+/** Undo a recorded payment (and its ledger entry); the schedule is re-projected. */
+export async function deleteLoanPayment(userId: string, loanId: string, paymentId: string, meta: RequestMeta = NO_META) {
+  await prisma.$transaction(async (tx) => {
+    await lockLoan(tx, loanId);
+    await ownedLoan(tx, userId, loanId);
+    const p = await tx.loanPayment.findFirst({ where: { id: paymentId, loanId, deletedAt: null } });
+    if (!p) throw new NotFoundError("Payment not found.");
+    await tx.loanPayment.update({ where: { id: p.id }, data: { deletedAt: new Date(), transactionId: null } });
+    if (p.transactionId) await deleteTransactionWithin(tx, userId, p.transactionId, meta, { fromLoan: true });
+    if (p.scheduleId) {
+      const row = await tx.loanAmortizationSchedule.findUnique({ where: { id: p.scheduleId } });
+      const left = await tx.loanPayment.aggregate({ where: { scheduleId: p.scheduleId, deletedAt: null }, _sum: { amount: true }, _count: true });
+      const status = left._count === 0 ? "UPCOMING" : toDecimal(left._sum.amount).greaterThanOrEqualTo(row!.emiAmount) ? "PAID" : "PARTIALLY_PAID";
+      await tx.loanAmortizationSchedule.update({ where: { id: p.scheduleId }, data: { status } });
+      if (status === "UPCOMING") {
+        // Detach so the row can be re-projected with everything after it.
+        await tx.loanPayment.updateMany({ where: { scheduleId: p.scheduleId, deletedAt: { not: null } }, data: { scheduleId: null } });
+        // Later unpaid rows are re-projected below; if a later instalment is
+        // already paid, this one stays in place and shows as overdue.
+      }
+    }
+    const loan = await syncLoanTotals(tx, loanId);
+    await rebuildFutureSchedule(tx, loan);
+    await audit({ userId, action: AuditAction.LOAN_PAYMENT_DELETED, entityType: "LoanPayment", entityId: p.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { loanId } }, tx);
+  });
+}
+
+/** Floating-rate revision from the next unpaid instalment: keep the EMI (tenure changes) or keep the tenure (EMI changes). */
+export async function reviseInterestRate(userId: string, loanId: string, input: unknown, meta: RequestMeta = NO_META) {
+  const d = parseOrThrow(rateRevisionSchema, input);
+  await prisma.$transaction(async (tx) => {
+    await lockLoan(tx, loanId);
+    let loan = await ownedLoan(tx, userId, loanId);
+    if (loan.status !== "ACTIVE") throw new AppError("This loan is closed.", 409, "LOAN_CLOSED");
+    const remaining = await tx.loanAmortizationSchedule.count({ where: { loanId, status: "UPCOMING", payments: { none: {} } } });
+    const data: Prisma.LoanUpdateInput = { interestRate: toDecimal(d.interestRate) };
+    if (d.mode === "KEEP_TENURE" && remaining > 0) data.emiAmount = emiForInstallments(loan.outstandingPrincipal, d.interestRate, remaining, loan.emiFrequency as Frequency);
+    loan = await tx.loan.update({ where: { id: loanId }, data });
+    try {
+      await rebuildFutureSchedule(tx, loan);
+    } catch (e) {
+      throw new AppError(`${(e as Error).message}. Choose “keep tenure” to raise the EMI instead.`, 400, "EMI_TOO_SMALL", { interestRate: [(e as Error).message] });
+    }
+    await audit({ userId, action: AuditAction.LOAN_RATE_REVISED, entityType: "Loan", entityId: loanId, ip: meta.ip, userAgent: meta.userAgent, metadata: { mode: d.mode } }, tx);
+  });
+}
+
+// ───────────────────────────── queries & analysis ─────────────────────────────
+
+function monthlyEquivalent(emi: Decimal, frequency: string) {
+  return emi.div(MONTHS_PER_PERIOD[frequency as Frequency] ?? 1);
+}
+
+export async function getLoansOverview(userId: string, timezone = DEFAULT_TIMEZONE) {
+  const today = todayInTimezone(timezone);
+  const yearStart = new Date(Date.UTC(today.getUTCFullYear(), 0, 1));
+  const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const loans = await prisma.loan.findMany({
+    where: { userId, deletedAt: null },
+    orderBy: [{ status: "asc" }, { createdAt: "asc" }],
+    include: {
+      schedule: { orderBy: { installmentNumber: "asc" } },
+      payments: { where: { deletedAt: null }, select: { paymentDate: true, principalComponent: true, interestComponent: true, amount: true } },
+    },
+  });
+
+  const rows = loans.map((l) => {
+    const unpaid = l.schedule.filter((r) => r.status !== "PAID");
+    const next = unpaid[0] ?? null;
+    const overdue = unpaid.filter((r) => r.dueDate < today && r.status !== "PAID").length;
+    const futureInterest = roundMoney(sum(l.schedule.filter((r) => r.status === "UPCOMING").map((r) => r.interestComponent)));
+    return {
+      id: l.id,
+      name: l.name,
+      lender: l.lender,
+      loanType: l.loanType,
+      status: l.status,
+      interestRate: l.interestRate,
+      interestType: l.interestType,
+      emiAmount: l.emiAmount,
+      emiFrequency: l.emiFrequency,
+      originalPrincipal: l.originalPrincipal,
+      outstandingPrincipal: l.outstandingPrincipal,
+      principalPaid: l.principalPaid,
+      interestPaid: l.interestPaid,
+      repaidPct: percentOf(l.principalPaid, l.originalPrincipal, 1),
+      paidInstallments: l.schedule.filter((r) => r.status === "PAID").length,
+      remainingInstallments: unpaid.length,
+      nextDue: next ? { dueDate: next.dueDate, amount: next.emiAmount, installmentNumber: next.installmentNumber, overdue: next.dueDate < today } : null,
+      overdueCount: overdue,
+      futureInterest,
+    };
+  });
+
+  const active = loans.filter((l) => l.status === "ACTIVE");
+  const allPayments = loans.flatMap((l) => l.payments);
+  const interestPaid = roundMoney(sum(allPayments.map((p) => p.interestComponent)));
+  const principalPaid = roundMoney(sum(allPayments.map((p) => p.principalComponent)));
+  const futureInterest = roundMoney(sum(rows.map((r) => r.futureInterest)));
+
+  // Interest vs principal paid per month (last 12 months).
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 11 + i, 1));
+    return { key: d.toISOString().slice(0, 7), start: d, end: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)) };
+  });
+  const monthly = months.map((m) => {
+    const ps = allPayments.filter((p) => p.paymentDate >= m.start && p.paymentDate < m.end);
+    return { key: m.key, principal: roundMoney(sum(ps.map((p) => p.principalComponent))), interest: roundMoney(sum(ps.map((p) => p.interestComponent))) };
+  });
+
+  return {
+    today,
+    loans: rows,
+    totals: {
+      outstanding: roundMoney(sum(active.map((l) => l.outstandingPrincipal))),
+      monthlyEmi: roundMoney(sum(active.map((l) => monthlyEquivalent(l.emiAmount, l.emiFrequency)))),
+      interestPaid,
+      principalPaid,
+      interestPaidThisYear: roundMoney(sum(allPayments.filter((p) => p.paymentDate >= yearStart).map((p) => p.interestComponent))),
+      interestPaidThisMonth: roundMoney(sum(allPayments.filter((p) => p.paymentDate >= monthStart).map((p) => p.interestComponent))),
+      futureInterest,
+      interestToPrincipalPct: percentOf(interestPaid, principalPaid, 1),
+    },
+    monthly,
+  };
+}
+
+export async function getLoanDetail(userId: string, id: string, timezone = DEFAULT_TIMEZONE) {
+  const today = todayInTimezone(timezone);
+  const loan = await prisma.loan.findFirst({
+    where: { id, userId, deletedAt: null },
+    include: {
+      repaymentAccount: { select: { id: true, nickname: true, bankName: true } },
+      schedule: { orderBy: { installmentNumber: "asc" }, include: { payments: { where: { deletedAt: null }, select: { amount: true, paymentDate: true } } } },
+      payments: {
+        where: { deletedAt: null },
+        orderBy: [{ paymentDate: "desc" }, { createdAt: "desc" }],
+        include: { schedule: { select: { installmentNumber: true } }, transaction: { select: { id: true, bankAccount: { select: { nickname: true } }, cashAccount: { select: { name: true } } } } },
+      },
+    },
+  });
+  if (!loan) throw new NotFoundError("Loan not found.");
+
+  const schedule = loan.schedule.map((r) => {
+    const actual = roundMoney(sum(r.payments.map((p) => p.amount)));
+    return {
+      ...r,
+      actualPaid: actual,
+      difference: roundMoney(actual.minus(r.emiAmount)),
+      lastPaidOn: r.payments.length ? r.payments.map((p) => p.paymentDate).sort((a, b) => b.getTime() - a.getTime())[0] : null,
+      overdue: r.status !== "PAID" && r.dueDate < today,
+    };
+  });
+  const upcoming = schedule.filter((r) => r.status === "UPCOMING");
+  const yearStart = new Date(Date.UTC(today.getUTCFullYear(), 0, 1));
+  const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  const futureInterest = roundMoney(sum(upcoming.map((r) => r.interestComponent)));
+
+  // Yearly principal vs interest: actual payments for the past, schedule for the future.
+  const byYear = new Map<number, { principal: Decimal; interest: Decimal; projected: boolean }>();
+  for (const p of loan.payments) {
+    const y = p.paymentDate.getUTCFullYear();
+    const cur = byYear.get(y) ?? { principal: new Decimal(0), interest: new Decimal(0), projected: false };
+    byYear.set(y, { principal: cur.principal.plus(p.principalComponent), interest: cur.interest.plus(p.interestComponent), projected: cur.projected });
+  }
+  for (const r of upcoming) {
+    const y = r.dueDate.getUTCFullYear();
+    const cur = byYear.get(y) ?? { principal: new Decimal(0), interest: new Decimal(0), projected: true };
+    byYear.set(y, { principal: cur.principal.plus(r.principalComponent), interest: cur.interest.plus(r.interestComponent), projected: true });
+  }
+  const yearly = [...byYear.entries()].sort((a, b) => a[0] - b[0]).map(([year, v]) => ({ year, principal: roundMoney(v.principal), interest: roundMoney(v.interest), projected: v.projected }));
+
+  return {
+    loan,
+    schedule,
+    payments: loan.payments,
+    analysis: {
+      outstanding: loan.outstandingPrincipal,
+      principalPaid: loan.principalPaid,
+      interestPaid: loan.interestPaid,
+      interestPaidThisYear: roundMoney(sum(loan.payments.filter((p) => p.paymentDate >= yearStart).map((p) => p.interestComponent))),
+      interestPaidThisMonth: roundMoney(sum(loan.payments.filter((p) => p.paymentDate >= monthStart).map((p) => p.interestComponent))),
+      futureInterest,
+      totalInterestCost: roundMoney(loan.interestPaid.plus(futureInterest)),
+      interestToPrincipalPct: percentOf(loan.interestPaid, loan.principalPaid, 1),
+      lifetimeInterestPct: percentOf(loan.interestPaid.plus(futureInterest), loan.originalPrincipal, 1),
+      repaidPct: percentOf(loan.principalPaid, loan.originalPrincipal, 1),
+      remainingInstallments: schedule.filter((r) => r.status !== "PAID").length,
+      projectedClosure: upcoming.length ? upcoming[upcoming.length - 1].dueDate : loan.closureDate,
+      overdueCount: schedule.filter((r) => r.overdue).length,
+      chargesPaid: roundMoney(sum(loan.payments.map((p) => p.chargesComponent))),
+    },
+    yearly,
+    balanceCurve: schedule.map((r) => ({ date: r.dueDate, closing: r.closingPrincipal, paid: r.status === "PAID" })),
+  };
+}
+
+export type LoanDetail = Awaited<ReturnType<typeof getLoanDetail>>;

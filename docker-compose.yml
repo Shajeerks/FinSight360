@@ -1,0 +1,25 @@
+# PostgreSQL for FinSight360 local development.
+# Uses host port 5433 so it never clashes with another PostgreSQL on 5432.
+#   Start:  npm run db:up      Stop:  npm run db:down
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: finsight360-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: finsight
+      POSTGRES_PASSWORD: finsight_dev
+      POSTGRES_DB: finsight360
+    ports:
+      - "5433:5432"
+    volumes:
+      - finsight360_pgdata:/var/lib/postgresql/data
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finsight -d finsight360"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finsight360_pgdata:
