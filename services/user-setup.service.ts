@@ -15,8 +15,8 @@ export async function seedDefaultsForUser(tx: Prisma.TransactionClient, userId: 
   });
 
   const prefs: { type: NotificationType; channel: NotificationChannel; leadDays: number }[] = [
-    { type: NotificationType.CARD_DUE, channel: NotificationChannel.IN_APP, leadDays: 3 },
-    { type: NotificationType.EMI_DUE, channel: NotificationChannel.IN_APP, leadDays: 1 },
+    { type: NotificationType.CARD_DUE, channel: NotificationChannel.IN_APP, leadDays: 5 },
+    { type: NotificationType.EMI_DUE, channel: NotificationChannel.IN_APP, leadDays: 3 },
     { type: NotificationType.REMINDER, channel: NotificationChannel.IN_APP, leadDays: 3 },
     { type: NotificationType.UTILIZATION_ALERT, channel: NotificationChannel.IN_APP, leadDays: 0 },
     { type: NotificationType.SECURITY, channel: NotificationChannel.IN_APP, leadDays: 0 },

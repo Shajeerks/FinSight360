@@ -9,8 +9,8 @@ export function decodeEntities(s: string): string {
   return s.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e: string) => {
     const k = e.toLowerCase();
     if (ENTITIES[k]) return ENTITIES[k];
-    if (k.startsWith("#x")) return String.fromCodePoint(parseInt(k.slice(2), 16) || 32);
-    if (k.startsWith("#")) return String.fromCodePoint(parseInt(k.slice(1), 10) || 32);
+    const cp = k.startsWith("#x") ? parseInt(k.slice(2), 16) : k.startsWith("#") ? parseInt(k.slice(1), 10) : NaN;
+    if (!Number.isNaN(cp)) return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : " ";
     return m;
   });
 }

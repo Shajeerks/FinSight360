@@ -42,7 +42,7 @@ export function ProfileForm({ defaults, email }: { defaults: ProfileInput; email
         <FormField id="displayName" label="Display name" hint="Optional — shown in greetings" error={errors.displayName?.message}>
           <Input id="displayName" {...form.register("displayName")} />
         </FormField>
-        <FormField id="email" label="Email" hint="Email changes will be supported with re-verification in a later phase.">
+        <FormField id="email" label="Email" hint="Your sign-in email can't be changed here.">
           <Input id="email" value={email} disabled readOnly />
         </FormField>
         <FormField id="phone" label="Phone" error={errors.phone?.message}>

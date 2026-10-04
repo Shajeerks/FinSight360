@@ -10,6 +10,8 @@ export const metadata: Metadata = {
   applicationName: "FinSight360",
   robots: { index: false, follow: false },
   appleWebApp: { capable: true, title: "FinSight360", statusBarStyle: "default" },
+  manifest: "/manifest.webmanifest",
+  icons: { icon: [{ url: "/icon.svg", type: "image/svg+xml" }, { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }], apple: "/icons/apple-touch-icon.png" },
   formatDetection: { telephone: false },
 };
 

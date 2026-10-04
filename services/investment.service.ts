@@ -45,7 +45,12 @@ export async function updateInvestmentAccount(userId: string, id: string, input:
 /** Soft delete — holdings and history are hidden with it (and drop out of net worth). */
 export async function deleteInvestmentAccount(userId: string, id: string, meta: RequestMeta = NO_META) {
   await ownedAccount(prisma, userId, id);
-  await prisma.investmentAccount.update({ where: { id }, data: { deletedAt: new Date(), status: "CLOSED" } });
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.investmentAccount.update({ where: { id }, data: { deletedAt: now, status: "CLOSED" } }),
+    prisma.investmentHolding.updateMany({ where: { investmentAccountId: id, deletedAt: null }, data: { deletedAt: now } }),
+    prisma.investmentTransaction.updateMany({ where: { investmentAccountId: id, deletedAt: null }, data: { deletedAt: now } }),
+  ]);
   await audit({ userId, action: AuditAction.INVESTMENT_ACCOUNT_DELETED, entityType: "InvestmentAccount", entityId: id, ip: meta.ip, userAgent: meta.userAgent });
 }
 
@@ -113,7 +118,7 @@ export async function createHolding(userId: string, input: unknown, meta: Reques
       ? await tx.investmentHolding.update({ where: { id: existing.id }, data })
       : await tx.investmentHolding.create({ data: { userId, investmentAccountId: d.investmentAccountId, instrumentKey: key, ...data } });
     if (existing) await tx.investmentTransaction.updateMany({ where: { holdingId: h.id, deletedAt: null }, data: { deletedAt: new Date() } });
-    if (price) await recordPrice(tx, key, price, "MANUAL");
+    if (price) await recordPrice(tx, key, price, "MANUAL", userId);
     await audit({ userId, action: AuditAction.INVESTMENT_HOLDING_SAVED, entityType: "InvestmentHolding", entityId: h.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { mode: "snapshot" } }, tx);
     return h;
   });
@@ -160,11 +165,12 @@ export async function deleteHolding(userId: string, id: string, meta: RequestMet
   });
 }
 
-async function recordPrice(tx: Tx, instrumentKey: string, price: Decimal, source: string, date = todayUtc()) {
+/** ownerKey "" = public price (AMFI); otherwise the price is private to that user. */
+export async function recordPrice(tx: Tx, instrumentKey: string, price: Decimal, source: string, ownerKey: string, date = todayUtc()) {
   await tx.investmentPrice.upsert({
-    where: { instrumentKey_priceDate_source: { instrumentKey, priceDate: date, source } },
+    where: { instrumentKey_priceDate_source_ownerKey: { instrumentKey, priceDate: date, source, ownerKey } },
     update: { price },
-    create: { instrumentKey, priceDate: date, price, source },
+    create: { instrumentKey, priceDate: date, price, source, ownerKey },
   });
 }
 
@@ -174,7 +180,7 @@ export async function updateHoldingPrice(userId: string, id: string, input: unkn
     await lockHolding(tx, id);
     const h = await ownedHolding(tx, userId, id);
     const price = toDecimal(d.currentPrice);
-    await recordPrice(tx, h.instrumentKey, price, "MANUAL");
+    await recordPrice(tx, h.instrumentKey, price, "MANUAL", userId);
     const u = await tx.investmentHolding.update({ where: { id }, data: { currentPrice: price, currentValue: roundMoney(h.quantity.times(price)), lastPricedAt: new Date() } });
     await audit({ userId, action: AuditAction.INVESTMENT_PRICES_UPDATED, entityType: "InvestmentHolding", entityId: id, ip: meta.ip, userAgent: meta.userAgent, metadata: { source: "MANUAL" } }, tx);
     return u;
@@ -205,6 +211,9 @@ async function holdingFor(tx: Tx, userId: string, accountId: string, i: { holdin
   });
 }
 
+/** Marker id of the auto-created opening BUY (an imported full history replaces it). */
+export const openingIdOf = (holdingId: string) => `OPENING:${holdingId}`;
+
 /** A snapshot holding that starts getting transactions keeps its position as an opening BUY. */
 async function ensureOpeningPosition(tx: Tx, userId: string, h: InvestmentHolding) {
   const count = await tx.investmentTransaction.count({ where: { holdingId: h.id, deletedAt: null } });
@@ -214,6 +223,7 @@ async function ensureOpeningPosition(tx: Tx, userId: string, h: InvestmentHoldin
       userId, investmentAccountId: h.investmentAccountId, holdingId: h.id, type: "BUY",
       tradeDate: new Date(Date.UTC(h.createdAt.getUTCFullYear(), h.createdAt.getUTCMonth(), h.createdAt.getUTCDate())),
       quantity: h.quantity, price: h.averageBuyPrice, amount: h.investedAmount, notes: "Opening position (entered as a holding)",
+      sourceType: "MANUAL", externalId: openingIdOf(h.id),
     },
   });
 }
@@ -276,7 +286,7 @@ export async function refreshMutualFundNavs(userId: string, meta: RequestMeta = 
       const n = navs.get(h.isin!);
       if (!n) continue;
       const price = toDecimal(n.nav);
-      await recordPrice(tx, h.instrumentKey, price, "AMFI", n.date);
+      await recordPrice(tx, h.instrumentKey, price, "AMFI", "", n.date);
       await tx.investmentHolding.update({ where: { id: h.id }, data: { currentPrice: price, currentValue: roundMoney(h.quantity.times(price)), lastPricedAt: n.date } });
       updated++;
       if (!latest || n.date > latest) latest = n.date;
@@ -389,7 +399,7 @@ export async function getHoldingDetail(userId: string, id: string) {
   const [account, transactions, prices] = await Promise.all([
     prisma.investmentAccount.findUniqueOrThrow({ where: { id: h.investmentAccountId }, select: { id: true, name: true } }),
     prisma.investmentTransaction.findMany({ where: { holdingId: id, deletedAt: null }, orderBy: [{ tradeDate: "desc" }, { createdAt: "desc" }] }),
-    prisma.investmentPrice.findMany({ where: { instrumentKey: h.instrumentKey }, orderBy: { priceDate: "asc" }, take: 400 }),
+    prisma.investmentPrice.findMany({ where: { instrumentKey: h.instrumentKey, ownerKey: { in: ["", userId] } }, orderBy: { priceDate: "asc" }, take: 400 }),
   ]);
   const v = valueHolding(h);
   const flows = cashFlowsOf([...transactions].reverse() as unknown as InvTxn[]);

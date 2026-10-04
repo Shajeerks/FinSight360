@@ -1,0 +1,22 @@
+{
+  "name": "FinSight360",
+  "short_name": "FinSight360",
+  "description": "Personal finance — accounts, cards, loans, investments and insights.",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f766e",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Transactions", "url": "/transactions" },
+    { "name": "Reminders", "url": "/reminders" },
+    { "name": "Upload statement", "url": "/imports" }
+  ]
+}

@@ -101,7 +101,7 @@ const gmail: MailProvider = {
   client(accessToken) {
     return {
       async listBankMessageIds(since, max) {
-        const q = `from:(${BANK_SENDER_DOMAINS.join(" OR ")}) after:${Math.floor(since.getTime() / 1000)} -in:chats`;
+        const q = `from:(${BANK_SENDER_DOMAINS.join(" OR ")}) after:${Math.floor(since.getTime() / 1000)} -in:chats -in:spam -in:trash`;
         const ids: string[] = [];
         let pageToken: string | undefined;
         do {
@@ -171,7 +171,7 @@ const outlook: MailProvider = {
       async listBankMessageIds(since, max) {
         const ids: string[] = [];
         let url: string | undefined =
-          `https://graph.microsoft.com/v1.0/me/messages?${new URLSearchParams({ $filter: `receivedDateTime ge ${since.toISOString()}`, $orderby: "receivedDateTime desc", $select: "id,from", $top: "50" })}`;
+          `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?${new URLSearchParams({ $filter: `receivedDateTime ge ${since.toISOString()}`, $orderby: "receivedDateTime desc", $select: "id,from", $top: "50" })}`;
         let scanned = 0;
         while (url && ids.length < max && scanned < 2000) {
           const r: { value: { id: string; from?: { emailAddress?: { address?: string } } }[]; "@odata.nextLink"?: string } = await call(url, { accessToken });

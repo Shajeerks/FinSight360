@@ -9,7 +9,7 @@ import { roundMoney, toDecimal } from "@/lib/money";
 import { detectFileKind, MAX_UPLOAD_BYTES, parseCsv, parseXlsx } from "@/lib/import/files";
 import { instrumentKeyOf } from "@/lib/investments/calc";
 import { GrowwFileError, parseGrowwRows, type GrowwParseResult } from "@/lib/investments/groww";
-import { recomputeHolding } from "@/services/investment.service";
+import { openingIdOf, recomputeHolding } from "@/services/investment.service";
 
 /**
  * Groww import by FILE (holdings statement or order history exported from
@@ -96,9 +96,9 @@ export async function importInvestmentFile(
         }
         if (price) {
           await tx.investmentPrice.upsert({
-            where: { instrumentKey_priceDate_source: { instrumentKey: key, priceDate: new Date(new Date().toISOString().slice(0, 10)), source: "GROWW_FILE" } },
+            where: { instrumentKey_priceDate_source_ownerKey: { instrumentKey: key, priceDate: new Date(new Date().toISOString().slice(0, 10)), source: "GROWW_FILE", ownerKey: userId } },
             update: { price },
-            create: { instrumentKey: key, priceDate: new Date(new Date().toISOString().slice(0, 10)), price, source: "GROWW_FILE" },
+            create: { instrumentKey: key, priceDate: new Date(new Date().toISOString().slice(0, 10)), price, source: "GROWW_FILE", ownerKey: userId },
           });
         }
       }
@@ -110,16 +110,39 @@ export async function importInvestmentFile(
       }
     } else {
       const ids = parsed.transactions.map((t) => t.externalId);
-      const already = new Set(
-        (await tx.investmentTransaction.findMany({ where: { userId, sourceType: "GROWW", externalId: { in: ids }, deletedAt: null }, select: { externalId: true } })).map((t) => t.externalId),
+      // Any earlier copy of these orders (live or removed) — the unique key ignores deletedAt.
+      const earlier = new Map(
+        (
+          await tx.investmentTransaction.findMany({
+            where: { userId, sourceType: "GROWW", externalId: { in: ids } },
+            include: { holding: { select: { deletedAt: true } }, investmentAccount: { select: { deletedAt: true } } },
+          })
+        ).map((t) => [t.externalId!, t]),
       );
+      const isLive = (t: (typeof earlier extends Map<string, infer V> ? V : never) | undefined) =>
+        Boolean(t && !t.deletedAt && !t.investmentAccount.deletedAt && (!t.holding || !t.holding.deletedAt));
+      const replaced = new Set<string>();
       for (const t of parsed.transactions) {
-        const dup = already.has(t.externalId);
+        const prev = earlier.get(t.externalId);
+        const dup = isLive(prev);
         preview.transactions.push({ name: t.instrumentName, type: t.type, date: t.tradeDate.toISOString().slice(0, 10), quantity: t.quantity, amount: t.amount, duplicate: dup });
         const key = instrumentKeyOf(t);
         let h = byKey.get(key);
-        if (!dup && h && !h.deletedAt && h._count.transactions === 0 && h.quantity.greaterThan(0) && !touched.has(h.id) && !preview.warnings.some((w) => w.startsWith(`${h!.instrumentName}:`))) {
-          preview.warnings.push(`${h.instrumentName}: the position you entered (${h.quantity.toString()} units) will be replaced by the imported history.`);
+        if (!dup && h && !h.deletedAt && !replaced.has(h.id)) {
+          // Entered positions (snapshot or the auto "opening position") and identical manual
+          // entries are replaced by the imported history so nothing is counted twice.
+          const manual = await tx.investmentTransaction.findMany({ where: { holdingId: h.id, deletedAt: null, sourceType: "MANUAL" } });
+          const opening = manual.find((m) => m.externalId === openingIdOf(h!.id));
+          if ((h._count.transactions === 0 && h.quantity.greaterThan(0)) || opening) {
+            preview.warnings.push(`${h.instrumentName}: the position you entered (${(opening?.quantity ?? h.quantity).toString()} units) will be replaced by the imported history.`);
+          }
+          const sameAsImported = manual.filter((m) => m.externalId !== openingIdOf(h!.id) && parsed.transactions.some((x) => instrumentKeyOf(x) === key && x.type === m.type && x.tradeDate.getTime() === m.tradeDate.getTime() && toDecimal(x.quantity).equals(m.quantity) && toDecimal(x.amount).equals(m.amount)));
+          if (sameAsImported.length) preview.warnings.push(`${h.instrumentName}: ${sameAsImported.length} transaction(s) you added by hand match imported orders and will be replaced by them.`);
+          if (opts.commit) {
+            const drop = [...(opening ? [opening.id] : []), ...sameAsImported.map((m) => m.id)];
+            if (drop.length) await tx.investmentTransaction.updateMany({ where: { id: { in: drop } }, data: { deletedAt: new Date() } });
+          }
+          replaced.add(h.id);
         }
         if (!opts.commit || dup) continue;
         if (!h || h.deletedAt) {
@@ -127,15 +150,18 @@ export async function importInvestmentFile(
           const created = h
             ? await tx.investmentHolding.update({ where: { id: h.id }, data })
             : await tx.investmentHolding.create({ data: { userId, investmentAccountId: accountId, instrumentKey: key, ...data } });
+          if (h) await tx.investmentTransaction.updateMany({ where: { holdingId: h.id, deletedAt: null }, data: { deletedAt: new Date() } });
           h = { ...created, _count: { transactions: 0 } };
           byKey.set(key, h);
+          replaced.add(h.id);
         }
-        await tx.investmentTransaction.create({
-          data: {
-            userId, investmentAccountId: accountId, holdingId: h.id, type: t.type, tradeDate: t.tradeDate, quantity: toDecimal(t.quantity), price: toDecimal(t.price), amount: toDecimal(t.amount),
-            charges: toDecimal(t.charges ?? 0), sourceType: "GROWW", externalId: t.externalId,
-          },
-        });
+        const data = {
+          userId, investmentAccountId: accountId, holdingId: h.id, type: t.type, tradeDate: t.tradeDate, quantity: toDecimal(t.quantity), price: toDecimal(t.price), amount: toDecimal(t.amount),
+          charges: toDecimal(t.charges ?? 0), sourceType: "GROWW" as const, externalId: t.externalId, deletedAt: null,
+        };
+        // An order imported before into something since removed is brought back here.
+        if (prev) await tx.investmentTransaction.update({ where: { id: prev.id }, data });
+        else await tx.investmentTransaction.create({ data });
         touched.add(h.id);
       }
       for (const id of touched) {

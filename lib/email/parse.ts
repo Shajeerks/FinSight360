@@ -32,27 +32,28 @@ export type ParsedEmailTxn = {
 
 export type ParseResult = { ok: true; txn: ParsedEmailTxn } | { ok: false; reason: string };
 
-const SENDERS: [RegExp, string, string][] = [
-  [/hdfcbank\.(net|com|bank\.in)$/, "HDFC Bank", "hdfc"],
-  [/icicibank\.com$/, "ICICI Bank", "icici"],
-  [/sbi\.co\.in$|sbicard\.com$/, "State Bank of India", "sbi"],
-  [/axisbank\.(com|in)$/, "Axis Bank", "axis"],
-  [/kotak\.com$|kotak\.bank\.in$/, "Kotak Mahindra Bank", "kotak"],
-  [/yesbank\.in$/, "Yes Bank", "yes"],
-  [/idfcfirstbank\.com$/, "IDFC FIRST Bank", "idfc"],
-  [/indusind\.com$/, "IndusInd Bank", "indusind"],
-  [/aubank\.in$/, "AU Small Finance Bank", "au"],
-  [/federalbank\.co\.in$/, "Federal Bank", "federal"],
-  [/rblbank\.com$/, "RBL Bank", "rbl"],
-  [/pnb\.co\.in$|pnb\.bank\.in$/, "Punjab National Bank", "pnb"],
-  [/bankofbaroda\.(com|co\.in)$|bobfinancial\.com$/, "Bank of Baroda", "bob"],
-  [/canarabank\.(com|in)$/, "Canara Bank", "canara"],
-  [/unionbankofindia\.(com|co\.in)$/, "Union Bank of India", "union"],
-  [/sc\.com$/, "Standard Chartered", "sc"],
-  [/hsbc\.co\.in$/, "HSBC", "hsbc"],
-  [/citi\.com$|citibank\.com$/, "Citibank", "citi"],
-  [/americanexpress\.(com|co\.in)$|aexp\.com$/, "American Express", "amex"],
-  [/onecard\.app$|getonecard\.app$/, "OneCard", "onecard"],
+/** Exact domains (or their subdomains — "alerts.sbi.co.in") — never look-alikes such as "notsc.com". */
+const SENDERS: [string[], string, string][] = [
+  [["hdfcbank.net", "hdfcbank.com", "hdfcbank.bank.in"], "HDFC Bank", "hdfc"],
+  [["icicibank.com"], "ICICI Bank", "icici"],
+  [["sbi.co.in", "sbicard.com"], "State Bank of India", "sbi"],
+  [["axisbank.com", "axisbank.in"], "Axis Bank", "axis"],
+  [["kotak.com", "kotak.bank.in"], "Kotak Mahindra Bank", "kotak"],
+  [["yesbank.in"], "Yes Bank", "yes"],
+  [["idfcfirstbank.com"], "IDFC FIRST Bank", "idfc"],
+  [["indusind.com"], "IndusInd Bank", "indusind"],
+  [["aubank.in"], "AU Small Finance Bank", "au"],
+  [["federalbank.co.in"], "Federal Bank", "federal"],
+  [["rblbank.com"], "RBL Bank", "rbl"],
+  [["pnb.co.in", "pnb.bank.in"], "Punjab National Bank", "pnb"],
+  [["bankofbaroda.com", "bankofbaroda.co.in", "bobfinancial.com"], "Bank of Baroda", "bob"],
+  [["canarabank.com", "canarabank.in"], "Canara Bank", "canara"],
+  [["unionbankofindia.com", "unionbankofindia.co.in"], "Union Bank of India", "union"],
+  [["sc.com"], "Standard Chartered", "sc"],
+  [["hsbc.co.in"], "HSBC", "hsbc"],
+  [["citi.com", "citibank.com"], "Citibank", "citi"],
+  [["americanexpress.com", "americanexpress.co.in", "aexp.com"], "American Express", "amex"],
+  [["onecard.app", "getonecard.app"], "OneCard", "onecard"],
 ];
 
 /** Sender domains used to build the mailbox search (Gmail `from:` query). */
@@ -65,7 +66,7 @@ export const BANK_SENDER_DOMAINS = [
 export function senderBank(from: string): { bank: string; id: string } | null {
   const addr = (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
   const domain = addr.split("@")[1] ?? "";
-  for (const [re, bank, id] of SENDERS) if (re.test(domain)) return { bank, id };
+  for (const [domains, bank, id] of SENDERS) if (domains.some((d) => domain === d || domain.endsWith(`.${d}`))) return { bank, id };
   return null;
 }
 
@@ -81,16 +82,41 @@ const NOT_TXN: [RegExp, string][] = [
 const DEBIT_VERBS = /\b(debited|spent|for using|withdrawn|sent|paid|transferred|deducted|used for (a )?(purchase|transaction)|charged|purchase of|txn of)\b/i;
 const CREDIT_VERBS = /\b(credited|received|deposited|refunded|reversed|added to)\b/i;
 const AMOUNT_RE = /(?:INR|Rs\.?|₹)\s?([\d,]+(?:\.\d{1,2})?)(?![\d,])/gi;
-const NOT_TXN_AMOUNT_CONTEXT = /(avl|avail|available|bal(ance)?|limit|outstanding|due|cashback of|reward|credit limit)\b[^\d]{0,14}$/i;
+/** "debited by 150.0" — SBI style, no currency marker. */
+const BARE_AMOUNT_RE = /\b(?:debited|credited)\s+(?:by|for|with)\s+([\d,]+(?:\.\d{1,2})?)(?![\d,])/i;
+const BALANCE_WORDS = /\b(avl|avail|available|bal|balance|limit|outstanding|reward points?)\b/i;
 
+/** Start of the clause that contains `index` (sentence end, ";" or line break). */
+function clauseStart(text: string, index: number) {
+  const before = text.slice(0, index);
+  const m = [...before.matchAll(/(?:[.!?](?=\s)|[;\n])/g)].pop();
+  return m ? (m.index ?? 0) + 1 : 0;
+}
+
+/**
+ * The transaction amount — never a balance or limit figure. Amounts whose clause
+ * mentions a balance/limit are skipped; an amount in a clause with a debit/credit
+ * verb wins over one without.
+ */
 function findAmount(text: string): { amount: string; index: number } | null {
+  const candidates: { amount: string; index: number; withVerb: boolean }[] = [];
   for (const m of text.matchAll(AMOUNT_RE)) {
-    const before = text.slice(Math.max(0, (m.index ?? 0) - 30), m.index);
-    if (NOT_TXN_AMOUNT_CONTEXT.test(before)) continue;
+    const idx = m.index ?? 0;
+    const start = clauseStart(text, idx);
+    const before = text.slice(start, idx);
+    const after = text.slice(idx + m[0].length, idx + m[0].length + 24);
+    if (BALANCE_WORDS.test(before) || /^\s*(is\s+)?(your\s+)?(avl|available|bal|balance|limit)\b/i.test(after)) continue;
     const a = parseAmount(m[1]);
-    if (a && !a.amount.startsWith("-") && !/^0+\.00$/.test(a.amount)) return { amount: a.amount, index: m.index ?? 0 };
+    if (!a || a.amount.startsWith("-") || /^0+\.00$/.test(a.amount)) continue;
+    const endM = text.slice(idx).search(/[.!?](?=\s)|[;\n]/);
+    const clause = text.slice(start, endM < 0 ? undefined : idx + endM);
+    candidates.push({ amount: a.amount, index: idx, withVerb: DEBIT_VERBS.test(clause) || CREDIT_VERBS.test(clause) });
   }
-  return null;
+  const best = candidates.find((c) => c.withVerb) ?? candidates[0];
+  if (best) return { amount: best.amount, index: best.index };
+  const bare = BARE_AMOUNT_RE.exec(text);
+  const a = bare ? parseAmount(bare[1]) : null;
+  return a && !/^0+\.00$/.test(a.amount) ? { amount: a.amount, index: bare!.index } : null;
 }
 
 const ACCOUNT_RE = /\b(?:a\/c|acct|account|ac)\b\.?\s*(?:no\.?|number|num)?\s*(?:ending(?:\s+(?:with|in))?\s*)?[:\-]?\s*(?:[x*]+\s*)?(\d{3,4})\b/i;
@@ -113,6 +139,8 @@ const DATE_CANDIDATES: [RegExp, (m: RegExpMatchArray) => [string, DateFormat][]]
   [/\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{4})\b/, (m) => [[m[1].replace(/[-.]/g, "/"), "dd/MM/yyyy"]]],
   [/\b(\d{1,2}[-/.]\d{1,2}[-/.]\d{2})\b/, (m) => [[m[1].replace(/[-.]/g, "/"), "dd/MM/yy"]]],
   [new RegExp(`\\b(\\d{1,2})[- ]?(${MONTHS})[a-z]*[- ,]*(\\d{4}|\\d{2})\\b`, "i"), (m) => [[`${m[1]} ${m[2]} ${m[3]}`, m[3].length === 4 ? "dd MMM yyyy" : "dd MMM yy"]]],
+  // "Oct 03, 2026" (ICICI)
+  [new RegExp(`\\b(${MONTHS})[a-z]*\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})\\b`, "i"), (m) => [[`${m[2]} ${m[1]} ${m[3]}`, "dd MMM yyyy"]]],
 ];
 
 function istParts(d: Date) {
@@ -133,8 +161,14 @@ function findDate(text: string, receivedAt: Date): { date: Date; at: Date | null
       const diffDays = (fallback.date.getTime() - date.getTime()) / 86_400_000;
       if (diffDays < -1 || diffDays > 15) continue;
       const after = text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 16);
-      const t = after.match(/^\s*(?:at\s*|[:,]\s*)?(\d{1,2}):(\d{2})(?::(\d{2}))?/i);
-      const at = t ? new Date(date.getTime() + ((+t[1] * 60 + +t[2]) * 60 + (+(t[3] ?? 0))) * 1000 - 330 * 60_000) : null;
+      const t = after.match(/^\s*(?:at\s*|[:,]\s*)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap])?\.?m?\.?(?![a-z])/i);
+      let hour = t ? +t[1] : 0;
+      if (t?.[4]) {
+        const pm = t[4].toLowerCase() === "p";
+        if (pm && hour < 12) hour += 12;
+        if (!pm && hour === 12) hour = 0;
+      }
+      const at = t && hour < 24 ? new Date(date.getTime() + ((hour * 60 + +t[2]) * 60 + (+(t[3] ?? 0))) * 1000 - 330 * 60_000) : null;
       return { date, at, explicit: true };
     }
   }
@@ -184,13 +218,20 @@ export function parseBankAlert(input: EmailInput): ParseResult {
 
   const d = DEBIT_VERBS.exec(text);
   const c = CREDIT_VERBS.exec(text);
-  if (!d && !c) return { ok: false, reason: "No debit/credit wording" };
+  const cardSpendWithoutVerb = !d && !c && /\b(transaction|txn) amount\b/i.test(text) && CARD_RE.test(text);
+  if (!d && !c && !cardSpendWithoutVerb) return { ok: false, reason: "No debit/credit wording" };
   // The first verb describes the account/card in the alert ("A/c debited …; SWIGGY credited").
-  let direction: "DEBIT" | "CREDIT" = !c || (d && d.index < c.index) ? "DEBIT" : "CREDIT";
-  // "Payment … received towards your credit card" / "refund … credited to your card" → card credit.
-  if (/\bpayment\b[^.]{0,60}\breceived\b/i.test(text)) direction = "CREDIT";
+  let direction: "DEBIT" | "CREDIT" = cardSpendWithoutVerb || !c || (d && d.index < c.index) ? "DEBIT" : "CREDIT";
+  const explicitDebit = /\b(debited|deducted|withdrawn)\s+from\b|\bhas been debited\b/i.test(text);
+  const explicitCredit = /\bcredited\s+(to|in(to)?)\s+(your\s+)?(a\/c|acct|account|ac|card|credit card)\b/i.test(text);
+  if (explicitDebit && !explicitCredit) direction = "DEBIT";
+  else if (explicitCredit && !explicitDebit) direction = "CREDIT";
+  // "Payment … received towards your credit card" → card credit (but never when the mail says it was debited).
+  else if (!explicitDebit && /\bpayment\b[^.]{0,60}\breceived\b/i.test(text)) direction = "CREDIT";
 
-  const acct = text.match(ACCOUNT_RE)?.[1] ?? null;
+  // The money account — not a loan account mentioned in the same alert ("EMI for loan a/c 7654 debited from a/c XX4321").
+  const acct =
+    [...text.matchAll(new RegExp(ACCOUNT_RE.source, "gi"))].find((m) => !/\bloan\s*$/i.test(text.slice(Math.max(0, (m.index ?? 0) - 12), m.index)))?.[1] ?? null;
   const cardDigits = text.match(CARD_RE)?.[1] ?? null;
   const isDebitCard = /\bdebit card\b/i.test(text);
   let instrument: ParsedEmailTxn["instrument"] = "unknown";
@@ -212,7 +253,7 @@ export function parseBankAlert(input: EmailInput): ParseResult {
   const when = findDate(text, input.receivedAt);
 
   let confidence = 50 + 20; // amount found
-  confidence += 10; // explicit debit/credit wording
+  confidence += cardSpendWithoutVerb ? 0 : 10; // explicit debit/credit wording
   if (instrument !== "unknown") confidence += 10;
   if (when.explicit) confidence += 5;
   if (ref) confidence += 3;

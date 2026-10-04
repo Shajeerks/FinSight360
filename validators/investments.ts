@@ -55,6 +55,8 @@ export const holdingSchema = z
   .superRefine((v, ctx) => {
     if (!v.averageBuyPrice && !v.investedAmount) ctx.addIssue({ code: "custom", path: ["averageBuyPrice"], message: "Enter the average buy price or the invested amount" });
     if (Number(v.quantity) <= 0) ctx.addIssue({ code: "custom", path: ["quantity"], message: "Quantity must be more than zero" });
+    const value = Number(v.quantity) * Number(v.currentPrice ?? v.averageBuyPrice ?? 0);
+    if (value >= 1e14 || Number(v.investedAmount ?? 0) >= 1e14) ctx.addIssue({ code: "custom", path: ["quantity"], message: "That value is too large" });
   });
 
 export const investmentTxnSchema = z
@@ -78,10 +80,11 @@ export const investmentTxnSchema = z
     if (!v.holdingId && !v.instrumentType) ctx.addIssue({ code: "custom", path: ["instrumentType"], message: "Choose the instrument type" });
     if (v.type !== "DIVIDEND" && Number(v.quantity) <= 0) ctx.addIssue({ code: "custom", path: ["quantity"], message: "Enter the units / quantity" });
     if (!["BONUS", "SPLIT"].includes(v.type) && !v.amount && !v.price) ctx.addIssue({ code: "custom", path: ["amount"], message: "Enter the amount or the price" });
+    if (Number(v.quantity) * Number(v.price ?? 0) >= 1e14 || Number(v.amount ?? 0) >= 1e14) ctx.addIssue({ code: "custom", path: ["amount"], message: "That value is too large" });
     if (v.tradeDate.getTime() > Date.now() + 86_400_000) ctx.addIssue({ code: "custom", path: ["tradeDate"], message: "Date can't be in the future" });
   });
 
-export const priceUpdateSchema = z.object({ currentPrice: price });
+export const priceUpdateSchema = z.object({ currentPrice: price.refine((v) => Number(v) < 1e10, "That price is too large") });
 
 export type InvestmentAccountInput = z.input<typeof investmentAccountSchema>;
 export type HoldingInput = z.input<typeof holdingSchema>;

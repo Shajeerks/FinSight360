@@ -14,6 +14,6 @@ export default auth;
 export const config = {
   matcher: [
     // Everything except Next internals, static assets and PWA files.
-    "/((?!_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|manifest.webmanifest|sw.js|icons/|robots.txt).*)",
+    "/((?!_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|manifest.webmanifest|sw.js|offline.html|icons/|robots.txt).*)",
   ],
 };

@@ -4,7 +4,7 @@ import type { NextAuthConfig } from "next-auth";
  * Edge/proxy-safe Auth.js configuration (no database imports).
  * The full configuration with providers + Prisma lives in `auth.ts`.
  */
-export const PUBLIC_PATHS = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email", "/offline"];
+export const PUBLIC_PATHS = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email"];
 const PUBLIC_API_PREFIXES = ["/api/auth", "/api/health"];
 
 const sessionHours = Number(process.env.SESSION_MAX_AGE_HOURS ?? 168);

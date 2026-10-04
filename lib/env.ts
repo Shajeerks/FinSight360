@@ -44,6 +44,23 @@ export function env(): ServerEnv {
   return cached;
 }
 
+/**
+ * Production readiness problems. Errors stop the server from starting in
+ * production; warnings are logged. (Development is never blocked.)
+ */
+export function productionIssues(e: Record<string, string | undefined> = process.env): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if ((e.AUTH_SECRET ?? "").length < 32) errors.push("AUTH_SECRET must be at least 32 characters (run: openssl rand -base64 32).");
+  if (/change[-_]?me|example|secret123/i.test(e.AUTH_SECRET ?? "")) errors.push("AUTH_SECRET still looks like a placeholder.");
+  if (!e.TOKEN_ENCRYPTION_KEY) warnings.push("TOKEN_ENCRYPTION_KEY is not set — email inbox connections are disabled.");
+  const appUrl = e.APP_URL ?? "";
+  if (appUrl && !appUrl.startsWith("https://") && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(appUrl)) warnings.push("APP_URL is not https — sign-in cookies and links should use HTTPS in production.");
+  if (e.EMAIL_TRANSPORT !== "smtp") warnings.push("EMAIL_TRANSPORT is not smtp — password-reset and notification emails are not delivered.");
+  if (e.TRUST_PROXY !== "true") warnings.push("TRUST_PROXY is not true — behind a reverse proxy, rate limits apply per proxy instead of per client.");
+  return { errors, warnings };
+}
+
 export function isGoogleAuthEnabled(): boolean {
   return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 }

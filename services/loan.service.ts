@@ -237,14 +237,30 @@ export async function recordLoanPayment(userId: string, loanId: string, input: u
     let charges = new Decimal(0);
     let row: LoanAmortizationSchedule | null = null;
 
+    // An EMI may finish a part-paid instalment and pay the next one (split into two parts).
+    let parts: { row: LoanAmortizationSchedule; amount: Decimal; interest: Decimal; principal: Decimal }[] = [];
     if (d.paymentType === "EMI") {
       row = d.scheduleId
         ? await tx.loanAmortizationSchedule.findFirst({ where: { id: d.scheduleId, loanId, status: { in: ["UPCOMING", "PARTIALLY_PAID", "MISSED"] } } })
         : await tx.loanAmortizationSchedule.findFirst({ where: { loanId, status: { in: ["UPCOMING", "PARTIALLY_PAID", "MISSED"] } }, orderBy: { installmentNumber: "asc" } });
       if (!row) throw new AppError("There is no unpaid instalment to apply this EMI to.", 409, "NO_INSTALMENT", { scheduleId: ["Choose an unpaid instalment"] });
-      const already = await tx.loanPayment.aggregate({ where: { scheduleId: row.id, deletedAt: null }, _sum: { interestComponent: true } });
-      const interestDue = Decimal.max(row.interestComponent.minus(already._sum.interestComponent ?? 0), 0);
-      interest = Decimal.min(amount, interestDue);
+      const allocate = async (r: LoanAmortizationSchedule, amt: Decimal) => {
+        const already = await tx.loanPayment.aggregate({ where: { scheduleId: r.id, deletedAt: null }, _sum: { interestComponent: true } });
+        const interestDue = Decimal.max(r.interestComponent.minus(already._sum.interestComponent ?? 0), 0);
+        const i = Decimal.min(amt, interestDue);
+        return { row: r, amount: amt, interest: i, principal: amt.minus(i) };
+      };
+      const paidSoFar = toDecimal((await tx.loanPayment.aggregate({ where: { scheduleId: row.id, deletedAt: null }, _sum: { amount: true } }))._sum.amount ?? 0);
+      const remainingDue = Decimal.max(row.emiAmount.minus(paidSoFar), 0);
+      const next = paidSoFar.greaterThan(0) && amount.greaterThan(remainingDue)
+        ? await tx.loanAmortizationSchedule.findFirst({ where: { loanId, installmentNumber: { gt: row.installmentNumber }, status: { in: ["UPCOMING", "MISSED"] } }, orderBy: { installmentNumber: "asc" } })
+        : null;
+      if (next && remainingDue.greaterThan(0)) {
+        parts = [await allocate(row, remainingDue), await allocate(next, amount.minus(remainingDue))];
+      } else {
+        parts = [await allocate(row, amount)];
+      }
+      interest = parts.reduce((a, x) => a.plus(x.interest), new Decimal(0));
       principal = amount.minus(interest);
       if (principal.greaterThan(outstanding)) {
         throw new AppError(`That's more than needed. ₹${outstanding.plus(interest).toFixed(2)} closes the loan — record it as a foreclosure.`, 400, "OVERPAYMENT", { amount: ["Amount exceeds what is owed"] });
@@ -290,25 +306,28 @@ export async function recordLoanPayment(userId: string, loanId: string, input: u
       transactionId = t.id;
     }
 
-    const payment = await tx.loanPayment.create({
-      data: {
-        loanId,
-        scheduleId: row?.id ?? null,
-        transactionId,
-        paymentDate: d.paymentDate,
-        paymentType: d.paymentType,
-        amount,
-        principalComponent: roundMoney(principal),
-        interestComponent: roundMoney(interest),
-        chargesComponent: roundMoney(charges),
-        notes: d.notes,
-      },
-    });
+    const base = { loanId, paymentDate: d.paymentDate, paymentType: d.paymentType, notes: d.notes };
+    let payment;
+    if (parts.length > 1) {
+      payment = await tx.loanPayment.create({
+        data: { ...base, scheduleId: parts[0].row.id, transactionId, amount: parts[0].amount, principalComponent: roundMoney(parts[0].principal), interestComponent: roundMoney(parts[0].interest), chargesComponent: 0 },
+      });
+      await tx.loanPayment.update({ where: { id: payment.id }, data: { groupId: payment.id } });
+      for (const part of parts.slice(1)) {
+        await tx.loanPayment.create({
+          data: { ...base, groupId: payment.id, scheduleId: part.row.id, amount: part.amount, principalComponent: roundMoney(part.principal), interestComponent: roundMoney(part.interest), chargesComponent: 0, notes: d.notes ?? "Rest of the same payment" },
+        });
+      }
+    } else {
+      payment = await tx.loanPayment.create({
+        data: { ...base, scheduleId: row?.id ?? null, transactionId, amount, principalComponent: roundMoney(principal), interestComponent: roundMoney(interest), chargesComponent: roundMoney(charges) },
+      });
+    }
 
-    if (row) {
-      const paidOnRow = await tx.loanPayment.aggregate({ where: { scheduleId: row.id, deletedAt: null }, _sum: { amount: true } });
-      const fullyPaid = toDecimal(paidOnRow._sum.amount).greaterThanOrEqualTo(row.emiAmount);
-      await tx.loanAmortizationSchedule.update({ where: { id: row.id }, data: { status: fullyPaid ? "PAID" : "PARTIALLY_PAID" } });
+    for (const r of parts.length ? parts.map((x) => x.row) : row ? [row] : []) {
+      const paidOnRow = await tx.loanPayment.aggregate({ where: { scheduleId: r.id, deletedAt: null }, _sum: { amount: true } });
+      const fullyPaid = toDecimal(paidOnRow._sum.amount).greaterThanOrEqualTo(r.emiAmount);
+      await tx.loanAmortizationSchedule.update({ where: { id: r.id }, data: { status: fullyPaid ? "PAID" : "PARTIALLY_PAID" } });
     }
 
     const remainingBefore = await tx.loanAmortizationSchedule.count({ where: { loanId, status: "UPCOMING" } });
@@ -322,7 +341,7 @@ export async function recordLoanPayment(userId: string, loanId: string, input: u
         await tx.loanAmortizationSchedule.deleteMany({ where: { loanId, status: { in: ["UPCOMING", "MISSED"] }, payments: { none: {} } } });
       } else {
         // Re-project only if the payment changed the principal path (short/extra EMI or prepayment).
-        const scheduledPrincipal = row ? row.principalComponent : new Decimal(0);
+        const scheduledPrincipal = parts.length > 1 ? new Decimal(-1) : row ? row.principalComponent : new Decimal(0);
         if (d.paymentType === "PREPAYMENT" || !principal.equals(scheduledPrincipal)) await rebuildFutureSchedule(tx, loan);
       }
     }
@@ -339,18 +358,23 @@ export async function deleteLoanPayment(userId: string, loanId: string, paymentI
     await ownedLoan(tx, userId, loanId);
     const p = await tx.loanPayment.findFirst({ where: { id: paymentId, loanId, deletedAt: null } });
     if (!p) throw new NotFoundError("Payment not found.");
-    await tx.loanPayment.update({ where: { id: p.id }, data: { deletedAt: new Date(), transactionId: null } });
-    if (p.transactionId) await deleteTransactionWithin(tx, userId, p.transactionId, meta, { fromLoan: true });
-    if (p.scheduleId) {
-      const row = await tx.loanAmortizationSchedule.findUnique({ where: { id: p.scheduleId } });
-      const left = await tx.loanPayment.aggregate({ where: { scheduleId: p.scheduleId, deletedAt: null }, _sum: { amount: true }, _count: true });
-      const status = left._count === 0 ? "UPCOMING" : toDecimal(left._sum.amount).greaterThanOrEqualTo(row!.emiAmount) ? "PAID" : "PARTIALLY_PAID";
-      await tx.loanAmortizationSchedule.update({ where: { id: p.scheduleId }, data: { status } });
+    // A payment split over two instalments is undone as a whole.
+    const group = p.groupId ? await tx.loanPayment.findMany({ where: { groupId: p.groupId, loanId, deletedAt: null } }) : [p];
+    for (const part of group) {
+      await tx.loanPayment.update({ where: { id: part.id }, data: { deletedAt: new Date(), transactionId: null } });
+      if (part.transactionId) await deleteTransactionWithin(tx, userId, part.transactionId, meta, { fromLoan: true });
+    }
+    for (const part of group) {
+      if (!part.scheduleId) continue;
+      const row = await tx.loanAmortizationSchedule.findUnique({ where: { id: part.scheduleId } });
+      if (!row) continue;
+      const left = await tx.loanPayment.aggregate({ where: { scheduleId: part.scheduleId, deletedAt: null }, _sum: { amount: true }, _count: true });
+      const status = left._count === 0 ? "UPCOMING" : toDecimal(left._sum.amount).greaterThanOrEqualTo(row.emiAmount) ? "PAID" : "PARTIALLY_PAID";
+      await tx.loanAmortizationSchedule.update({ where: { id: part.scheduleId }, data: { status } });
       if (status === "UPCOMING") {
-        // Detach so the row can be re-projected with everything after it.
-        await tx.loanPayment.updateMany({ where: { scheduleId: p.scheduleId, deletedAt: { not: null } }, data: { scheduleId: null } });
-        // Later unpaid rows are re-projected below; if a later instalment is
-        // already paid, this one stays in place and shows as overdue.
+        // Detach so the row can be re-projected; if a later instalment is already
+        // paid, this one stays in place and shows as overdue.
+        await tx.loanPayment.updateMany({ where: { scheduleId: part.scheduleId, deletedAt: { not: null } }, data: { scheduleId: null } });
       }
     }
     const loan = await syncLoanTotals(tx, loanId);

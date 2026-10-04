@@ -152,7 +152,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
       <Card>
         <CardHeader>
           <CardTitle>Net Worth Trend</CardTitle>
-          <CardDescription>Month-end snapshots</CardDescription>
+          <CardDescription>Last snapshot of each month</CardDescription>
         </CardHeader>
         <CardContent>
           <NetWorthChart

@@ -522,6 +522,21 @@ export type ImportSummary = { created: number; linked: number; possibleDuplicate
  * Then balances are recomputed from the ledger.
  */
 export async function commitImport(userId: string, importId: string, meta: RequestMeta = NO_META): Promise<ImportSummary> {
+  const summary = await commitImportTx(userId, importId, meta);
+  if (summary.possibleDuplicates || summary.pendingReview) {
+    const { notify } = await import("@/services/notification.service");
+    await notify(userId, {
+      type: "IMPORT",
+      title: "Imported statement needs a look",
+      body: `${summary.created} added, ${summary.linked} matched existing. ${summary.possibleDuplicates} possible duplicate(s) and ${summary.pendingReview} uncertain row(s) are waiting for you.`,
+      link: summary.possibleDuplicates ? "/imports/duplicates" : "/imports/review",
+      dedupeKey: `import:${importId}`,
+    }).catch(() => undefined);
+  }
+  return summary;
+}
+
+async function commitImportTx(userId: string, importId: string, meta: RequestMeta): Promise<ImportSummary> {
   return prisma.$transaction(async (tx) => {
     await lockImport(tx, importId);
     const imp = await findOwnedImport(tx, userId, importId);

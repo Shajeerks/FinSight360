@@ -8,7 +8,7 @@ export function NetWorthChart({ data }: { data: NetWorthPoint[] }) {
   if (data.length < 2) {
     return (
       <p className="flex h-56 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-        The trend appears once at least two monthly net-worth snapshots exist. Snapshots are recorded automatically from Phase 7.
+        The trend appears once net worth has been recorded in two different months. A snapshot is saved every day while FinSight360 runs.
       </p>
     );
   }

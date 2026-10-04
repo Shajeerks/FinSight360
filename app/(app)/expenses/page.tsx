@@ -94,7 +94,7 @@ export default async function ExpensesPage({ searchParams }: PageProps<"/expense
         </Card>
       </div>
 
-      <TransactionList rows={o.list.rows} options={options} emptyTitle="No expenses this month" emptyDescription="Add an expense or upload a statement (Phase 4)." emptyAction={add} />
+      <TransactionList rows={o.list.rows} options={options} emptyTitle="No expenses this month" emptyDescription="Add an expense or upload a statement." emptyAction={add} />
       <Pagination page={o.list.page} pages={o.list.pages} total={o.list.total} makeHref={(p) => `/expenses?month=${formatYearMonth(ym)}&page=${p}`} />
     </div>
   );

@@ -18,6 +18,7 @@ export const POST = apiHandler<Ctx>(async (req, { params }) => {
   const rl = await limiters.upload.check(`upload:${user.id}`);
   if (!rl.allowed) throw new AppError(`Too many uploads. Try again in ${Math.ceil(rl.retryAfterSeconds / 60)} minutes.`, 429, "RATE_LIMITED");
   if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) throw new AppError("Upload the file as multipart/form-data.", 415, "UNSUPPORTED_MEDIA_TYPE");
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES + 64 * 1024) throw new AppError("Files up to 10 MB are supported.", 413, "FILE_TOO_LARGE");
   let form: FormData;
   try {
     form = await req.formData();

@@ -20,11 +20,11 @@ Personal finance management: bank accounts, credit cards, loans and EMIs, income
 | 4 | Statement import (CSV/XLSX/PDF), duplicate detection, review workflow | ✅ Done |
 | 5 | Gmail and Outlook integration, email transaction parser | ✅ Done |
 | 6 | Investment portfolio, Groww provider | ✅ Done |
-| 7 | Analytics, spending intelligence, recurring expenses, net worth | ⏳ Next |
-| 8 | Notifications, reminders, PWA, mobile optimization | ⏳ |
-| 9 | Testing, security, performance and production readiness | ⏳ |
+| 7 | Analytics, spending intelligence, recurring expenses, net worth, budgets, reports | ✅ Done |
+| 8 | Notifications, reminders, PWA, mobile optimization | ✅ Done |
+| 9 | Testing, security, performance and production readiness | ✅ Done |
 
-Pages for later phases already exist in the menu. They say which phase delivers them and never show fake data.
+All nine phases are complete.
 
 ---
 
@@ -167,13 +167,17 @@ npm run dev
 | `npm run db:seed` | Load reference data and demo data |
 | `npm run db:reset` | ⚠️ Delete all data, re-apply migrations and re-seed |
 | `npm run db:studio` | Browse the database at http://localhost:5556 |
+| `npm run jobs:daily` | Run the daily jobs now (net-worth snapshot, recurring detection, due notifications) |
+| `npm run sync:email` | Sync connected mailboxes once |
 
 ### Production build
 
 ```bash
 npm run build
-npm run start            # http://localhost:3010
+npm run start
 ```
+
+See **§11 Production deployment** before putting FinSight360 on a server.
 
 ---
 
@@ -234,7 +238,8 @@ Without these settings the Email Sync page still works for testing: paste an ale
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | – | Google sign-in |
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` | Phase 5 | Gmail import |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT_ID` | Phase 5 | Outlook import |
-| `EMAIL_TRANSPORT`, `EMAIL_FROM` | – | Email delivery (`console` in development) |
+| `EMAIL_TRANSPORT`, `EMAIL_FROM` | – | Email delivery: `console` (prints to the terminal) or `smtp` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD` | with `smtp` | SMTP server for password-reset and notification emails (Gmail app password, Zoho, SES, Brevo…) |
 | `REQUIRE_EMAIL_VERIFICATION` | – | Block sign-in until the email is verified |
 | `ALLOW_REGISTRATION` | – | Allow new sign-ups |
 | `STORAGE_DIR` | – | Where uploaded statements are kept (default `./storage`, private and gitignored) |
@@ -340,6 +345,27 @@ npm run dev
 | **Prices** | **Refresh NAVs** fetches mutual-fund NAVs from AMFI's public daily file (needs the fund's ISIN). Stock prices come from your latest holdings statement or **Update price**. |
 | **Portfolio** | Allocation by asset type, value-vs-invested history, best/worst performers. Investments count in the dashboard's net worth. |
 
+### Analytics, budgets & reports (Phase 7)
+
+| What | How it works |
+|---|---|
+| **Monthly Analysis** | Income, expenses, savings and EMI burden vs last month; 12-month trend; category trends (up/down vs the 3-month average); spending by weekday; unusually large spends; savings, EMI and fixed-cost ratios with tips. |
+| **Budgets** | Monthly or yearly, overall or per category. Refunds reduce spend. Turns amber at your alert level and red when exceeded (and notifies you). |
+| **Recurring payments** | **Detect recurring** finds subscriptions, rent, SIPs and salary from at least 3 regular payments. Confirm or ignore each; confirmed ones show their next date and appear in Reminders. |
+| **Net worth** | Bank + cash + investments − card dues − loan outstanding. A snapshot is saved daily; the chart shows the last snapshot of each month. |
+| **Reports** | Expenses, income, transactions, cards, loans, interest, investments and net worth for any period (this month, last month, Indian financial year…). View on screen, download CSV or Excel, or **Print / Save as PDF**. CSV cells are protected against spreadsheet formula injection. |
+
+### Reminders, notifications & the app on your phone (Phase 8)
+
+| What | How it works |
+|---|---|
+| **Reminders** | One list of everything due: card bills and loan EMIs (automatic, they clear when you record the payment), confirmed recurring payments, and your own reminders (insurance, bills, SIPs, subscriptions) that can repeat weekly to yearly. **Done** rolls a repeating reminder to its next date. |
+| **Notifications** | The bell and the Notifications page show due/overdue items, high card utilization, budget alerts, import results and security events (password changed, signed out everywhere). Each alert is sent once. |
+| **Settings** | Per type: in-app, browser and email; and how many days before a card bill or EMI to be told. Email is **off** until you turn it on (and needs SMTP settings). |
+| **Browser notifications** | **Allow on this device** on the Notifications page. They appear while FinSight360 is open (or installed and running). |
+| **Install as an app** | iPhone: Safari → Share → **Add to Home Screen**. Android/desktop Chrome: **Install app**. It opens full-screen with its own icon and shortcuts. |
+| **Offline** | Your financial data is never stored on the device. With no connection the app shows a "You're offline" page instead of stale numbers. |
+
 Groww API: Groww's statements are the supported route. A direct API connection would only be added through an official, documented API you authorize yourself; it isn't enabled in this version.
 
 ## 7. Project structure
@@ -391,6 +417,12 @@ Rules followed throughout:
 ## 10. Tests
 
 ```bash
+npm run check
+```
+
+That one command runs lint, the type check and all unit and integration tests.
+
+```bash
 npm test                  # unit tests, no database needed
 npm run test:integration  # needs DATABASE_URL_TEST
 ```
@@ -423,4 +455,25 @@ The Phase 6 tests cover weighted-average cost, realised gains with charges, bonu
 
 The review regression tests cover: confirming/merging a card-payment duplicate keeps the bank debit and is undone correctly, undoing both imports of a linked pair, promoting a hidden duplicate when its original is removed, loan EMIs after a loan is removed, undoing an earlier EMI, and object-ids sent to server actions.
 
+The Phase 7 tests cover recurring detection (monthly/weekly, salary, irregular spends ignored), category trends, unusual spends, ratios, budgets net of refunds, net-worth snapshots and history, and every report type in CSV (formula-safe) and Excel.
+
+The Phase 8 tests cover reminders (statuses, repeating roll-forward, ownership, automatic types refused), derived card-bill and EMI items, notifications sent only once, lead-day preferences, opt-in email, disabled types, per-user dedupe and security notices. The production check tests cover weak/placeholder `AUTH_SECRET` and the readiness warnings.
+
 The Phase 4 import tests cover CSV header detection and mapping templates, PDF parsing with the running-balance check, password-protected PDFs (password never stored), XLSX signed amounts, re-upload protection, the **§47 acceptance check** (an email-sourced transaction plus the same statement row = one transaction with two sources, counted once), possible duplicates and every resolution action, the review queue, undo, ownership checks and two simultaneous imports of the same file.
+
+## 11. Production deployment
+
+FinSight360 holds sensitive financial data. Before running it anywhere other than your own Mac:
+
+1. **HTTPS only.** Put it behind a reverse proxy (Caddy, Nginx, Cloudflare Tunnel) with TLS. Set `APP_URL` and `AUTH_URL` to the `https://` address and `TRUST_PROXY="true"` (only when the proxy is yours, so rate limits see real client IPs).
+2. **Secrets.** `npm run setup:env` generates a strong `AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY`. In production the server **refuses to start** with a short or placeholder `AUTH_SECRET`, and logs a warning for anything else missing. Never commit `.env`.
+3. **Database.** Use a dedicated PostgreSQL database and user for FinSight360 (never a shared or production database of another system). Run `npm run db:deploy` on each release.
+4. **Email.** Set `EMAIL_TRANSPORT="smtp"` and the `SMTP_*` values so password resets and opted-in notifications are delivered.
+5. **Registration.** After creating your account, set `ALLOW_REGISTRATION="false"` if the instance is just for you.
+6. **Background jobs.** While `npm run start` is running, a built-in scheduler runs the daily jobs and the mailbox sync. If you run several app instances, or the app sleeps, use your system scheduler instead, e.g. cron:
+   - `15 6 * * * cd /srv/finsight360 && npm run jobs:daily`
+   - `0 * * * * cd /srv/finsight360 && npm run sync:email`
+7. **Backups.** Back up the database daily (e.g. `pg_dump -Fc finsight360 > finsight360-$(date +%F).dump`) and the `STORAGE_DIR` folder; keep copies encrypted and off the server. Test a restore with `pg_restore` now and then.
+8. **Health check.** `GET /api/health` returns `200` when the app and database are up (no user data).
+
+Security built in: bcrypt passwords, account lockout and rate limits, sessions that can be revoked everywhere, encrypted OAuth tokens, per-user ownership checks on every query, audit log, CSV-injection-safe exports, a strict Content-Security-Policy (no third-party scripts), `X-Frame-Options: DENY`, HSTS in production, `Cache-Control: no-store` on every API response, and a service worker that never caches pages or API data. No CVV, PIN, OTP, full card or account numbers or bank passwords are ever stored — only the last 4 digits.

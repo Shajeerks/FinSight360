@@ -708,6 +708,8 @@ model LoanPayment {
   interestComponent  Decimal         @default(0) @db.Decimal(18, 2)
   chargesComponent   Decimal         @default(0) @db.Decimal(18, 2)
   notes              String?
+  /// One ledger payment split over two instalments shares a groupId (= id of the first part).
+  groupId            String?
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   deletedAt          DateTime?
@@ -717,6 +719,7 @@ model LoanPayment {
   transaction Transaction?              @relation(fields: [transactionId], references: [id], onDelete: SetNull)
 
   @@index([loanId, paymentDate])
+  @@index([groupId])
   @@map("loan_payments")
 }
 
@@ -1320,9 +1323,11 @@ model InvestmentPrice {
   priceDate     DateTime @db.Date
   price         Decimal  @db.Decimal(18, 4)
   source        String
+  /// "" for public prices (AMFI NAVs); the user's id for prices a user entered or imported.
+  ownerKey      String   @default("")
   createdAt     DateTime @default(now())
 
-  @@unique([instrumentKey, priceDate, source])
+  @@unique([instrumentKey, priceDate, source, ownerKey])
   @@map("investment_prices")
 }
 

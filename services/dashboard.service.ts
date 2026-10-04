@@ -8,7 +8,7 @@ import { getCreditCardOverview } from "@/services/credit-card.service";
 import { addDays, addMonths, daysBetween, monthLabel, monthRange, todayInTimezone, type YearMonth } from "@/lib/dates";
 import { Decimal, percentOf, roundMoney, toDecimal } from "@/lib/money";
 
-async function monthSummary(userId: string, ym: YearMonth): Promise<MonthlySummary> {
+export async function monthSummary(userId: string, ym: YearMonth): Promise<MonthlySummary> {
   const { start, end } = monthRange(ym);
   const [groups, split] = await Promise.all([
     ledgerRepository.totalsByType(userId, start, end),
@@ -61,7 +61,7 @@ export async function getDashboardData(userId: string, ym: YearMonth, timezone =
       include: { loan: { select: { name: true, lender: true } } },
       take: 10,
     }),
-    prisma.netWorthSnapshot.findMany({ where: { userId }, orderBy: { snapshotDate: "asc" }, take: 24 }),
+    prisma.netWorthSnapshot.findMany({ where: { userId, snapshotDate: { gte: new Date(Date.UTC(ym.year, ym.month - 13, 1)) } }, orderBy: { snapshotDate: "asc" } }),
     monthSummary(userId, ym),
     monthSummary(userId, addMonths(ym, -1)),
   ]);
@@ -145,7 +145,10 @@ export async function getDashboardData(userId: string, ym: YearMonth, timezone =
   const trend = await Promise.all(months.map(async (m) => ({ ym: m, label: monthLabel(m, "short"), summary: await monthSummary(userId, m) })));
 
   // ── Net worth trend ──
-  const netWorthTrend = snapshots.map((s) => ({ date: s.snapshotDate, netWorth: roundMoney(s.netWorth) }));
+  // Snapshots are daily; the trend uses the last one of each month (12 months).
+  const byMonth = new Map<string, (typeof snapshots)[number]>();
+  for (const s of snapshots) byMonth.set(s.snapshotDate.toISOString().slice(0, 7), s);
+  const netWorthTrend = [...byMonth.values()].slice(-12).map((s) => ({ date: s.snapshotDate, netWorth: roundMoney(s.netWorth) }));
 
   // ── Early, rule-based insights (full spending intelligence arrives in Phase 7) ──
   const insights: Insight[] = [];

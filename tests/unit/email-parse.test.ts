@@ -86,11 +86,52 @@ describe("bank alert parser", () => {
   });
 });
 
+describe("bank alert parser — review regressions", () => {
+  it("a bill paid FROM the account is a debit even when the biller 'received' it", () => {
+    const t = ok(p("alerts@hdfcbank.net", "Payment", "Your payment of Rs.1,299.00 towards AIRTEL POSTPAID has been received and debited from your A/c XX4321 on 03-10-26."));
+    expect(t).toMatchObject({ direction: "DEBIT", amount: "1299.00", accountLast4: "4321" });
+    expect(ok(p("alerts@hdfcbank.net", "x", "We have received payment of Rs 23,456 towards your loan. Amount debited from a/c XX4321 on 03-10-26.")).direction).toBe("DEBIT");
+  });
+
+  it("never takes the available balance / limit as the amount", () => {
+    const t = ok(p("alerts@hdfcbank.net", "x", "Available balance in a/c XX4321 is INR 12,000.00. INR 500.00 debited on 03-10-26 for UPI to RAHUL."));
+    expect(t.amount).toBe("500.00");
+    const c = ok(p("alerts@axisbank.com", "x", "Available Credit Limit on your card is INR 1,20,000.00. INR 499.00 spent on Axis Bank Credit Card XX5530 at NETFLIX on 04-10-2026."));
+    expect(c.amount).toBe("499.00");
+  });
+
+  it("loan account numbers aren't mistaken for the debited account", () => {
+    expect(ok(p("alerts@hdfcbank.net", "EMI", "EMI of Rs 12,500 for loan a/c 7654 debited from your a/c XX4321 on 03-10-26.")).accountLast4).toBe("4321");
+  });
+
+  it("month-first dates and 12-hour times", () => {
+    const t = ok(p("credit_cards@icicibank.com", "x", "INR 2,000.00 spent using ICICI Bank Card XX8812 on Oct 03, 2026 at 09:12 PM on AMAZON."));
+    expect(iso(t.transactionDate)).toBe("2026-10-03");
+    expect(t.transactionAt?.toISOString()).toBe("2026-10-03T15:42:00.000Z"); // 21:12 IST
+  });
+
+  it("cashback credits, currency-less SBI amounts and verb-less card spends are read", () => {
+    expect(ok(p("alerts@hdfcbank.net", "x", "Cashback of Rs 150 credited to your HDFC Bank Credit Card ending 1043 on 04-10-2026.")).amount).toBe("150.00");
+    expect(ok(p("alerts@sbi.co.in", "x", "Dear Customer, your A/C XXXXX7703 debited by 150.0 on 03Oct26 trf to SWIGGY Ref No 412345678901 -SBI")).amount).toBe("150.00");
+    const a = ok(p("alerts@axisbank.com", "x", "Transaction Amount: INR 3,499 Merchant Name: CROMA Axis Bank Credit Card No. XX2233 Date & Time: 04-10-2026 10:15:00"));
+    expect(a).toMatchObject({ amount: "3499.00", direction: "DEBIT", cardLast4: "2233" });
+  });
+
+  it("look-alike sender domains aren't trusted", () => {
+    expect(senderBank("alerts@notsc.com")).toBeNull();
+    expect(senderBank("x@myhdfcbank.net")).toBeNull();
+    expect(senderBank("x@x-hdfcbank.net")).toBeNull();
+    expect(senderBank("cbssbi.cas@alerts.sbi.co.in")?.bank).toBe("State Bank of India");
+    expect(ok(p("alerts@notsc.com", "x", "Rs.25,000 debited from account ending 1234")).confidence).toBeLessThan(85);
+  });
+});
+
 describe("message text helpers", () => {
   it("prefers text/plain parts and converts HTML otherwise", () => {
     const b64 = (s: string) => Buffer.from(s).toString("base64url");
     expect(gmailPayloadText({ mimeType: "multipart/alternative", parts: [{ mimeType: "text/plain", body: { data: b64("Rs.645.00 has been debited from account **4821") } }, { mimeType: "text/html", body: { data: b64("<b>x</b>") } }] })).toContain("Rs.645.00");
     expect(gmailPayloadText({ mimeType: "text/html", body: { data: b64("<html><style>p{}</style><p>Rs.&nbsp;645.00 debited</p><p>A/c&nbsp;XX4821</p></html>") } })).toBe("Rs. 645.00 debited\nA/c XX4821");
     expect(htmlToText("<td>Amount</td><td>&#8377;1,250</td>")).toBe("Amount ₹1,250");
+    expect(() => htmlToText("<p>bad &#x110000; entity</p>")).not.toThrow();
   });
 });

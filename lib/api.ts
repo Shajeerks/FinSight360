@@ -30,6 +30,8 @@ export function toSafeError(error: unknown): { status: number; body: { error: { 
   }
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === "P2002") return { status: 409, body: { error: { code: "CONFLICT", message: "This record already exists." } } };
+    // Value too long / out of range for its column → the input was invalid, not a server fault.
+    if (error.code === "P2000" || error.code === "P2020") return { status: 422, body: { error: { code: "VALIDATION_ERROR", message: "A value is too long or out of range." } } };
     if (error.code === "P2025") return { status: 404, body: { error: { code: "NOT_FOUND", message: "Record not found." } } };
   }
   logger.error("unhandled_error", { error });

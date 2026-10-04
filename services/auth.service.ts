@@ -39,6 +39,16 @@ function emailVerificationRequired() {
 
 // ───────────────────────────── registration ─────────────────────────────
 
+/** Security events always notify (never blocks the action itself). */
+async function securityNotice(userId: string, title: string, body: string) {
+  try {
+    const { notify } = await import("@/services/notification.service");
+    await notify(userId, { type: "SECURITY", title, body, link: "/settings/security" });
+  } catch (error) {
+    logger.error("security_notice_failed", { error });
+  }
+}
+
 export async function registerUser(input: unknown, meta: RequestMeta = { ip: null, userAgent: null }) {
   if (!registrationAllowed()) throw new AppError("New sign-ups are disabled on this FinSight360 instance.", 403, "REGISTRATION_DISABLED");
   const data = parseOrThrow(registerSchema, input);
@@ -230,6 +240,7 @@ export async function resetPassword(input: unknown, meta: RequestMeta = { ip: nu
     }),
   ]);
   await audit({ userId: record.userId, action: AuditAction.PASSWORD_RESET, entityType: "User", entityId: record.userId, ip: meta.ip, userAgent: meta.userAgent });
+  await securityNotice(record.userId, "Your password was reset", "Your FinSight360 password was reset and all devices were signed out. If this wasn't you, reset it again now.");
 }
 
 // ───────────────────────────── signed-in account security ─────────────────────────────
@@ -249,12 +260,14 @@ export async function changePassword(userId: string, input: unknown, meta: Reque
     data: { passwordHash: await hashPassword(data.newPassword), passwordChangedAt: new Date(), sessionVersion: { increment: 1 } },
   });
   await audit({ userId, action: AuditAction.PASSWORD_CHANGED, entityType: "User", entityId: userId, ip: meta.ip, userAgent: meta.userAgent, metadata: { hadPassword: Boolean(user.passwordHash) } });
+  await securityNotice(userId, "Your password was changed", "Your FinSight360 password was changed. If this wasn't you, reset your password now.");
 }
 
 /** Invalidates every session (all devices) by bumping sessionVersion. */
 export async function revokeAllSessions(userId: string, meta: RequestMeta = { ip: null, userAgent: null }) {
   await prisma.user.update({ where: { id: userId }, data: { sessionVersion: { increment: 1 } } });
   await audit({ userId, action: AuditAction.SESSIONS_REVOKED, entityType: "User", entityId: userId, ip: meta.ip, userAgent: meta.userAgent });
+  await securityNotice(userId, "Signed out everywhere", "All devices were signed out of FinSight360.");
 }
 
 /** Used by the session callback to confirm a JWT is still valid. */

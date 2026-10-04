@@ -30,6 +30,17 @@ const SYN: Record<Field, string[]> = {
   category: ["category", "asset class", "sub-category", "sub category", "instrument type"],
 };
 
+const cleanIsin = (v: string | undefined) => {
+  const s = v?.trim().toUpperCase() ?? "";
+  return /^IN[A-Z0-9]{10}$/.test(s) ? s : null;
+};
+const cleanSymbol = (v: string | undefined) => {
+  const s = v?.trim().toUpperCase().replace(/[^A-Z0-9&._-]/g, "") ?? "";
+  return s ? s.slice(0, 20) : null;
+};
+/** Keeps values inside the database's Decimal(18,2/4) columns. */
+const tooBig = (...vals: (string | null | undefined)[]) => vals.some((v) => v !== null && v !== undefined && Math.abs(Number(v)) >= 1e12);
+
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9/(). ]/g, "").trim();
 
 function fieldOf(h: string): Field | null {
@@ -140,11 +151,12 @@ export function parseGrowwRows(rows: string[][]): GrowwParseResult {
       if (!avg) avg = toDecimal(invested).dividedBy(qty).toDecimalPlaces(4).toString();
       const cp = price4(cell(r, "currentPrice"));
       const cv = num(cell(r, "currentValue"));
+      if (tooBig(qty, avg, invested, cp, cv) || toDecimal(qty).times(cp ?? avg).greaterThanOrEqualTo(1e14)) return void skipped.push({ row: headerRow + i + 2, reason: "Value out of range" });
       holdings.push({
         instrumentName: name.slice(0, 160),
         instrumentType: instrumentTypeOf(name, headerText, cell(r, "category")),
-        isin: cell(r, "isin")?.toUpperCase() || null,
-        symbol: cell(r, "symbol")?.toUpperCase() || null,
+        isin: cleanIsin(cell(r, "isin")),
+        symbol: cleanSymbol(cell(r, "symbol")),
         quantity: qty,
         averageBuyPrice: avg,
         investedAmount: invested,
@@ -178,6 +190,7 @@ export function parseGrowwRows(rows: string[][]): GrowwParseResult {
     if (!amount && price) amount = toDecimal(price).times(q).toDecimalPlaces(2).toFixed(2);
     if (!price && amount && !q.isZero()) price = toDecimal(amount).abs().dividedBy(q).toDecimalPlaces(4).toString();
     if (!amount) return void skipped.push({ row: rowNo, reason: "No amount or price" });
+    if (tooBig(qty, price, amount)) return void skipped.push({ row: rowNo, reason: "Value out of range" });
     const amt = toDecimal(amount).abs();
     const orderId = cell(r, "orderId");
     const key = [name.toUpperCase(), tradeDate.toISOString().slice(0, 10), type, q.toString(), amt.toFixed(2)].join("|");
@@ -189,8 +202,8 @@ export function parseGrowwRows(rows: string[][]): GrowwParseResult {
       type,
       tradeDate,
       instrumentName: name.slice(0, 160),
-      isin: cell(r, "isin")?.toUpperCase() || null,
-      symbol: cell(r, "symbol")?.toUpperCase() || null,
+      isin: cleanIsin(cell(r, "isin")),
+      symbol: cleanSymbol(cell(r, "symbol")),
       quantity: q.toString(),
       price: price ?? "0",
       amount: amt.toFixed(2),

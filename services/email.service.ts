@@ -102,10 +102,12 @@ async function freshAccessToken(conn: EmailConnection): Promise<string> {
   if (conn.accessTokenEnc && conn.tokenExpiresAt && conn.tokenExpiresAt.getTime() > Date.now() + 60_000) return decryptSecret(conn.accessTokenEnc);
   if (!conn.refreshTokenEnc) throw new MailAuthError("No refresh token");
   const t: TokenSet = await mailProvider(conn.provider).refresh(decryptSecret(conn.refreshTokenEnc));
-  await prisma.emailConnection.update({
-    where: { id: conn.id },
+  // Conditional write: a disconnect that happened meanwhile must win (tokens stay wiped).
+  const saved = await prisma.emailConnection.updateMany({
+    where: { id: conn.id, status: { not: "DISCONNECTED" } },
     data: { accessTokenEnc: encryptSecret(t.accessToken), tokenExpiresAt: t.expiresAt, ...(t.refreshToken ? { refreshTokenEnc: encryptSecret(t.refreshToken) } : {}) },
   });
+  if (!saved.count) throw new AppError("This mailbox was disconnected.", 409, "DISCONNECTED");
   return t.accessToken;
 }
 
@@ -247,6 +249,9 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
     const ids = await client.listBankMessageIds(since, MAX_MESSAGES_PER_SYNC);
     const known = new Set((await prisma.emailMessage.findMany({ where: { connectionId: conn.id, providerMessageId: { in: ids } }, select: { providerMessageId: true } })).map((m) => m.providerMessageId));
     for (const id of ids.filter((x) => !known.has(x)).reverse()) {
+      // Stop promptly if the user disconnects while we're working.
+      const current = await prisma.emailConnection.findUnique({ where: { id: conn.id }, select: { status: true } });
+      if (!current || current.status === "DISCONNECTED") break;
       try {
         const mail = await client.getMessage(id);
         summary.fetched++;
@@ -280,16 +285,26 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
         logger.warn("email_message_failed", { provider: conn.provider, error: e });
       }
     }
-    await prisma.emailConnection.update({ where: { id: conn.id }, data: { lastSyncAt: startedAt, lastError: null, status: "ACTIVE" } });
+    await prisma.emailConnection.updateMany({ where: { id: conn.id, status: { not: "DISCONNECTED" } }, data: { lastSyncAt: startedAt, lastError: null, status: "ACTIVE" } });
     await prisma.emailSyncJob.update({
       where: { id: job.id },
       data: { status: summary.failed ? "PARTIAL" : "SUCCEEDED", finishedAt: new Date(), messagesFetched: summary.fetched, candidatesCreated: summary.transactions + summary.linked + summary.needsAccount, failedCount: summary.failed },
     });
     await audit({ userId, action: AuditAction.EMAIL_SYNCED, entityType: "EmailConnection", entityId: conn.id, ip: meta.ip, userAgent: meta.userAgent, metadata: summary });
+    if (summary.transactions || summary.needsAccount) {
+      const { notify } = await import("@/services/notification.service");
+      await notify(userId, {
+        type: "IMPORT",
+        title: `${summary.transactions} transaction(s) from ${conn.emailAddress}`,
+        body: summary.needsAccount ? `${summary.needsAccount} alert(s) need you to choose an account.` : "Added from your bank alerts.",
+        link: summary.needsAccount ? "/imports/email" : "/transactions?source=" + conn.provider,
+        dedupeKey: `email-sync:${job.id}`,
+      }).catch(() => undefined);
+    }
     return summary;
   } catch (e) {
     const expired = e instanceof MailAuthError;
-    await prisma.emailConnection.update({ where: { id: conn.id }, data: { status: expired ? "EXPIRED" : "ERROR", lastError: expired ? "Access expired or was revoked — reconnect this mailbox." : "Sync failed — try again later." } });
+    await prisma.emailConnection.updateMany({ where: { id: conn.id, status: { not: "DISCONNECTED" } }, data: { status: expired ? "EXPIRED" : "ERROR", lastError: expired ? "Access expired or was revoked — reconnect this mailbox." : "Sync failed — try again later." } });
     await prisma.emailSyncJob.update({ where: { id: job.id }, data: { status: "FAILED", finishedAt: new Date(), errorMessage: expired ? "auth" : "provider", messagesFetched: summary.fetched } });
     if (expired) throw new AppError("Access to this mailbox expired or was revoked. Reconnect it.", 401, "RECONNECT_REQUIRED");
     if (e instanceof AppError) throw e;
@@ -380,11 +395,16 @@ export async function resolveEmailCandidate(userId: string, id: string, input: u
 export async function retryPendingEmailCandidates(userId: string) {
   const pending = await prisma.emailTransactionCandidate.findMany({ where: { userId, status: "PENDING_REVIEW" }, include: candidateInclude, take: 500 });
   let placed = 0;
-  for (const c of pending) {
-    const r = await prisma.$transaction((tx) => ingestCandidate(tx, userId, c));
-    if (r.outcome !== "NEEDS_ACCOUNT") placed++;
+  for (const p of pending) {
+    const r = await prisma.$transaction(async (tx) => {
+      // Re-read under a row lock: the user may have approved/rejected it meanwhile.
+      await tx.$queryRaw`SELECT id FROM "email_transaction_candidates" WHERE id = ${p.id} FOR UPDATE`;
+      const c = await tx.emailTransactionCandidate.findFirst({ where: { id: p.id, userId, status: "PENDING_REVIEW" }, include: candidateInclude });
+      return c ? ingestCandidate(tx, userId, c) : { outcome: "SKIPPED" as const, note: null };
+    });
+    if (r.outcome !== "NEEDS_ACCOUNT" && r.outcome !== "SKIPPED") placed++;
   }
-  return { placed, remaining: pending.length - placed };
+  return { placed, remaining: await prisma.emailTransactionCandidate.count({ where: { userId, status: "PENDING_REVIEW" } }) };
 }
 
 // ───────────────────────────── queries ─────────────────────────────

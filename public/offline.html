@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f766e">
+<title>Offline · FinSight360</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f8fafc; --fg: #0f172a; --muted: #64748b; --primary: #0f766e; --tint: #ccfbf1; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b1120; --fg: #e2e8f0; --muted: #94a3b8; --primary: #2dd4bf; --tint: #134e4a; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; text-align: center; }
+  main { max-width: 360px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .icon { width: 48px; height: 48px; border-radius: 999px; background: var(--tint); color: var(--primary); display: flex; align-items: center; justify-content: center; }
+  h1 { margin: 0; font-size: 20px; }
+  p { margin: 0; color: var(--muted); font-size: 14px; }
+  a { color: var(--primary); font-weight: 600; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="icon" aria-hidden="true">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M8.5 16.43a5 5 0 0 1 7 0"/><path d="M5 12.86a10 10 0 0 1 5.17-2.69"/><path d="M19 12.86a10 10 0 0 0-2-1.5"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/><path d="m2 2 20 20"/></svg>
+  </div>
+  <h1>You're offline</h1>
+  <p>FinSight360 doesn't keep your financial data on this device. Reconnect to the internet and try again.</p>
+  <a href="">Try again</a>
+</main>
+</body>
+</html>
