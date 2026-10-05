@@ -20,7 +20,7 @@ export function TrendChart({ data }: { data: { label: string; income: number; ex
           <Bar dataKey="expenses" name="Expenses" fill="var(--chart-expense)" radius={[3, 3, 0, 0]} maxBarSize={18} />
           <Bar dataKey="emi" name="EMI" fill="var(--chart-3)" radius={[3, 3, 0, 0]} maxBarSize={18} />
           <Bar dataKey="investments" name="Invested" fill="var(--chart-2)" radius={[3, 3, 0, 0]} maxBarSize={18} />
-          <Line type="monotone" dataKey="savings" name="Savings" stroke="var(--chart-1)" strokeWidth={2.5} dot={false} />
+          <Line type="monotone" dataKey="savings" name="Savings" stroke="var(--chart-5)" strokeWidth={2.5} dot={{ r: 2.5, fill: "var(--chart-5)" }} />
         </ComposedChart>
       </ResponsiveContainer>
     </div>

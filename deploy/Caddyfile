@@ -1,0 +1,14 @@
+# Automatic HTTPS (Let's Encrypt) for your domain, proxied to the app.
+{$DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 12MB
+	}
+	reverse_proxy app:3010 {
+		header_up X-Real-IP {remote_host}
+	}
+	log {
+		output stdout
+		format console
+	}
+}

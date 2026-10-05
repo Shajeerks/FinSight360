@@ -167,6 +167,7 @@ npm run dev
 | `npm run db:seed` | Load reference data and demo data |
 | `npm run db:reset` | ⚠️ Delete all data, re-apply migrations and re-seed |
 | `npm run db:studio` | Browse the database at http://localhost:5556 |
+| `npm run seed:test` | Create a separate **test login** with 6 months of realistic data (10 banks, 10 cards, 10 personal loans, daily spends ≤ ₹15k/month) — `test@finsight360.local` / `Test@123456`. Re-running rebuilds it; your own account is never touched |
 | `npm run jobs:daily` | Run the daily jobs now (net-worth snapshot, recurring detection, due notifications) |
 | `npm run sync:email` | Sync connected mailboxes once |
 
@@ -462,6 +463,9 @@ The Phase 8 tests cover reminders (statuses, repeating roll-forward, ownership, 
 The Phase 4 import tests cover CSV header detection and mapping templates, PDF parsing with the running-balance check, password-protected PDFs (password never stored), XLSX signed amounts, re-upload protection, the **§47 acceptance check** (an email-sourced transaction plus the same statement row = one transaction with two sources, counted once), possible duplicates and every resolution action, the review queue, undo, ownership checks and two simultaneous imports of the same file.
 
 ## 11. Production deployment
+
+**Step-by-step server guide: [DEPLOY.md](DEPLOY.md)** — Docker Compose stack (app + PostgreSQL + Caddy HTTPS + daily backups) in `docker-compose.prod.yml` and `deploy/`.
+
 
 FinSight360 holds sensitive financial data. Before running it anywhere other than your own Mac:
 

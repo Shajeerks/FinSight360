@@ -46,3 +46,6 @@ next-env.d.ts
 # local uploads / storage
 /storage/
 /coverage/
+
+# server backups
+/backups/

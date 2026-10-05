@@ -24,7 +24,8 @@
     "db:studio": "prisma studio --port 5556",
     "postinstall": "prisma generate",
     "sync:email": "tsx --conditions=react-server scripts/sync-email.ts",
-    "jobs:daily": "tsx --conditions=react-server scripts/daily-jobs.ts"
+    "jobs:daily": "tsx --conditions=react-server scripts/daily-jobs.ts",
+    "seed:test": "tsx --conditions=react-server scripts/seed-test-data.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",
