@@ -3,15 +3,15 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Calculator, Loader2, Pencil, Percent, Plus, Wallet } from "lucide-react";
+import { Calculator, History, Loader2, Pencil, Percent, Plus, Wallet } from "lucide-react";
 import { toast } from "sonner";
 import { z } from "zod";
 import {
-  loanSchema, loanDetailsSchema, loanPaymentSchema, rateRevisionSchema,
+  loanSchema, loanDetailsSchema, loanPaymentSchema, loanProgressSchema, rateRevisionSchema,
   LOAN_TYPES, INTEREST_TYPES, EMI_FREQUENCIES,
-  type LoanInput, type LoanDetailsInput, type LoanPaymentInput, type RateRevisionInput,
+  type LoanInput, type LoanDetailsInput, type LoanPaymentInput, type LoanProgressInput, type RateRevisionInput,
 } from "@/validators/loans";
-import { createLoanAction, previewEmiAction, recordLoanPaymentAction, reviseRateAction, updateLoanAction } from "@/features/loans/actions";
+import { createLoanAction, previewEmiAction, recordLoanPaymentAction, reviseRateAction, setLoanProgressAction, updateLoanAction } from "@/features/loans/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -50,7 +50,7 @@ export function AddLoanDialog({ banks }: { banks: { id: string; label: string }[
     defaultValues: {
       name: "", lender: "", loanType: "HOME", accountLast4: "", principal: "", interestRate: "", interestType: "FIXED",
       startDate: today(), firstEmiDate: today(), tenureMonths: 60, emiFrequency: "MONTHLY", emiAmount: "", roundEmiToRupee: false,
-      repaymentAccountId: banks[0]?.id ?? "", markPastAsPaid: true, notes: "",
+      repaymentAccountId: banks[0]?.id ?? "", markPastAsPaid: true, emisPaid: "", outstandingAsPerBank: "", notes: "",
     },
   });
   const { errors } = form.formState;
@@ -129,7 +129,16 @@ export function AddLoanDialog({ banks }: { banks: { id: string; label: string }[
             </div>
           </div>
 
-          <CheckboxField id="markPastAsPaid" label="Mark EMIs due before today as already paid" hint="For loans you've been repaying before using FinSight360. No ledger transactions are created for them." {...form.register("markPastAsPaid")} />
+          <fieldset className="grid gap-4 rounded-lg border p-3 sm:grid-cols-2">
+            <legend className="px-1 text-sm font-medium">Already repaying this loan?</legend>
+            <FormField id="emisPaid" label="EMIs already paid" hint="Leave blank to mark every EMI due before today as paid; enter 0 if none." error={errors.emisPaid?.message}>
+              <Input id="emisPaid" inputMode="numeric" placeholder="e.g. 14" {...form.register("emisPaid")} />
+            </FormField>
+            <FormField id="outstandingAsPerBank" label="Outstanding as per lender (₹, optional)" hint="From your loan statement or lender app. The principal repaid is matched to it." error={errors.outstandingAsPerBank?.message}>
+              <Input id="outstandingAsPerBank" inputMode="decimal" {...form.register("outstandingAsPerBank")} />
+            </FormField>
+            <p className="text-xs text-muted-foreground sm:col-span-2">These are recorded as paid before FinSight360 — no bank transactions are created. You can change them later with <strong>Update repayment progress</strong>.</p>
+          </fieldset>
           <FormField id="notes" label="Notes" error={errors.notes?.message}><Textarea id="notes" rows={2} {...form.register("notes")} /></FormField>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -271,6 +280,51 @@ export function ReviseRateDialog({ loanId, currentRate }: { loanId: string; curr
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Apply</Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ───────────────────────── Paid before FinSight360 ─────────────────────────
+
+export function LoanProgressDialog({ loanId, defaults, totalEmis, hasRecordedPayments }: { loanId: string; defaults: LoanProgressInput; totalEmis: number; hasRecordedPayments: boolean }) {
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [pending, start] = React.useTransition();
+  const [error, setError] = React.useState<string | null>(null);
+  const form = useForm<LoanProgressInput, unknown, z.output<typeof loanProgressSchema>>({ resolver: zodResolver(loanProgressSchema), defaultValues: defaults });
+  const submit = form.handleSubmit(() =>
+    start(async () => {
+      setError(null);
+      const res = await setLoanProgressAction(loanId, form.getValues());
+      if (!res.ok) return void (setError(res.error), applyErrors(form, res));
+      toast.success(res.message ?? "Saved");
+      setOpen(false);
+      router.refresh();
+    }),
+  );
+  return (
+    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (o) form.reset(defaults); }}>
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}><History /> Update repayment progress</Button>
+      <DialogContent title="Repayment before FinSight360" description="How much of this loan you'd already repaid before tracking it here. No bank transactions are created.">
+        <form onSubmit={submit} className="grid gap-4" noValidate>
+          {error && <Alert variant="destructive">{error}</Alert>}
+          <FormField id="p-emis" label="EMIs already paid" hint={`Out of ${totalEmis} on the schedule. Payments you record in FinSight360 are counted separately.`} error={form.formState.errors.emisPaid?.message}>
+            <Input id="p-emis" inputMode="numeric" {...form.register("emisPaid")} />
+          </FormField>
+          <FormField
+            id="p-out"
+            label="Outstanding as per lender (₹, optional)"
+            hint={hasRecordedPayments ? "Not available once payments are recorded here — the outstanding then follows those payments." : "From your loan statement or lender app. Principal repaid is matched to it; anything beyond the schedule shows as a part-prepayment."}
+            error={form.formState.errors.outstandingAsPerBank?.message}
+          >
+            <Input id="p-out" inputMode="decimal" disabled={hasRecordedPayments} {...form.register("outstandingAsPerBank")} />
+          </FormField>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Update</Button>
           </div>
         </form>
       </DialogContent>

@@ -16,7 +16,7 @@ import {
   type Frequency,
 } from "@/lib/finance/amortization";
 import { todayInTimezone, DEFAULT_TIMEZONE } from "@/lib/dates";
-import { emiPreviewSchema, loanDetailsSchema, loanPaymentSchema, loanSchema, rateRevisionSchema } from "@/validators/loans";
+import { emiPreviewSchema, loanDetailsSchema, loanPaymentSchema, loanProgressSchema, loanSchema, rateRevisionSchema } from "@/validators/loans";
 import { assertAccountRef } from "@/services/account.service";
 import { createTransactionWithin, deleteTransactionWithin } from "@/services/transaction.service";
 
@@ -170,10 +170,14 @@ export async function createLoan(userId: string, input: unknown, meta: RequestMe
         principalComponent: r.principal,
         interestComponent: r.interest,
         closingPrincipal: r.closingPrincipal,
-        status: d.markPastAsPaid && r.dueDate < today ? "PAID" : "UPCOMING",
+        status: "UPCOMING" as const,
       })),
     });
-    if (d.markPastAsPaid) {
+    if (d.emisPaid !== null || d.outstandingAsPerBank !== null) {
+      const n = d.emisPaid ?? rows.filter((r) => r.dueDate < today).length;
+      await applyOpeningProgress(tx, loan.id, n, d.outstandingAsPerBank === null ? null : toDecimal(d.outstandingAsPerBank), today);
+    } else if (d.markPastAsPaid) {
+      await tx.loanAmortizationSchedule.updateMany({ where: { loanId: loan.id, dueDate: { lt: today } }, data: { status: "PAID" } });
       const paid = await tx.loanAmortizationSchedule.findMany({ where: { loanId: loan.id, status: "PAID" } });
       if (paid.length) {
         await tx.loanPayment.createMany({
@@ -185,14 +189,116 @@ export async function createLoan(userId: string, input: unknown, meta: RequestMe
             amount: r.emiAmount,
             principalComponent: r.principalComponent,
             interestComponent: r.interestComponent,
+            isOpening: true,
             notes: "Marked as paid when the loan was added",
           })),
         });
       }
       await syncLoanTotals(tx, loan.id);
     }
-    await audit({ userId, action: AuditAction.LOAN_CREATED, entityType: "Loan", entityId: loan.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { loanType: d.loanType, markPastAsPaid: d.markPastAsPaid } }, tx);
+    await audit({ userId, action: AuditAction.LOAN_CREATED, entityType: "Loan", entityId: loan.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { loanType: d.loanType, markPastAsPaid: d.markPastAsPaid, emisPaid: d.emisPaid } }, tx);
     return tx.loan.findUniqueOrThrow({ where: { id: loan.id } });
+  });
+}
+
+// ───────────────────────────── paid before FinSight360 ─────────────────────────────
+
+/**
+ * Record repayment made before the loan was tracked here: the first `emisPaid`
+ * instalments are marked paid and, when the lender's outstanding is given, the
+ * principal repaid is matched to it (any extra is shown as a part-prepayment).
+ * These "opening" payments never touch the ledger. Calling it again replaces the
+ * previous opening entries. The remaining schedule is re-projected from the
+ * resulting outstanding with the same EMI.
+ */
+async function applyOpeningProgress(tx: Tx, loanId: string, emisPaid: number, bankOutstanding: Decimal | null, asOf: Date) {
+  const loan = await tx.loan.findUniqueOrThrow({ where: { id: loanId } });
+  const real = await tx.loanPayment.findMany({ where: { loanId, deletedAt: null, isOpening: false }, include: { schedule: { select: { installmentNumber: true } } } });
+  if (real.length && bankOutstanding !== null) {
+    throw new AppError("The outstanding is already worked out from the payments you've recorded in FinSight360. Undo those payments first, or record a prepayment instead.", 409, "PAYMENTS_RECORDED", { outstandingAsPerBank: ["Leave blank — payments are already recorded"] });
+  }
+  if (bankOutstanding !== null && bankOutstanding.greaterThan(loan.originalPrincipal)) {
+    throw new AppError("The outstanding can't be more than the loan amount.", 400, "INVALID_OUTSTANDING", { outstandingAsPerBank: ["Can't exceed the principal"] });
+  }
+  const firstReal = real.length ? Math.min(...real.map((p) => p.schedule?.installmentNumber ?? Number.MAX_SAFE_INTEGER)) : null;
+
+  // Remove the previous opening entries.
+  await tx.loanPayment.deleteMany({ where: { loanId, isOpening: true } });
+
+  if (!real.length) {
+    // Nothing recorded yet: start again from the original schedule.
+    await tx.loanAmortizationSchedule.deleteMany({ where: { loanId } });
+    const rows = generateAmortizationSchedule({
+      principal: loan.originalPrincipal,
+      annualRatePct: loan.interestRate,
+      tenureMonths: loan.tenureMonths,
+      frequency: loan.emiFrequency as Frequency,
+      firstDueDate: loan.firstEmiDate,
+      emi: loan.emiAmount,
+    });
+    await tx.loanAmortizationSchedule.createMany({
+      data: rows.map((r) => ({ loanId, installmentNumber: r.installmentNumber, dueDate: r.dueDate, openingPrincipal: r.openingPrincipal, emiAmount: r.emi, principalComponent: r.principal, interestComponent: r.interest, closingPrincipal: r.closingPrincipal, status: "UPCOMING" as const })),
+    });
+  } else {
+    await tx.loanAmortizationSchedule.updateMany({ where: { loanId, status: "PAID", payments: { none: { deletedAt: null } } }, data: { status: "UPCOMING" } });
+  }
+
+  const schedule = await tx.loanAmortizationSchedule.findMany({ where: { loanId }, orderBy: { installmentNumber: "asc" } });
+  const maxPaid = firstReal !== null ? Math.min(firstReal - 1, schedule.length) : schedule.length;
+  if (emisPaid > maxPaid) {
+    const msg = firstReal !== null
+      ? `EMI #${firstReal} is already recorded in FinSight360, so at most ${maxPaid} EMI(s) can be marked as paid before it.`
+      : `This loan has ${schedule.length} EMIs in total.`;
+    throw new AppError(msg, 400, "TOO_MANY_EMIS", { emisPaid: [`At most ${maxPaid}`] });
+  }
+  const paidRows = schedule.slice(0, emisPaid);
+
+  // Principal split: as scheduled, or matched to the lender's outstanding.
+  let principals = paidRows.map((r) => r.principalComponent);
+  let extraPrincipal = new Decimal(0);
+  if (bankOutstanding !== null) {
+    const target = roundMoney(loan.originalPrincipal.minus(bankOutstanding));
+    const scheduled = sum(principals);
+    if (target.lessThan(scheduled)) {
+      // Repaid less principal than scheduled (e.g. higher effective rate): scale down, rest is interest.
+      const factor = scheduled.isZero() ? new Decimal(0) : target.dividedBy(scheduled);
+      principals = principals.map((p) => roundMoney(p.times(factor)));
+      const diff = target.minus(sum(principals));
+      if (principals.length) principals[principals.length - 1] = principals[principals.length - 1].plus(diff);
+    } else {
+      extraPrincipal = target.minus(scheduled);
+    }
+  }
+
+  if (paidRows.length) {
+    await tx.loanPayment.createMany({
+      data: paidRows.map((r, i) => ({
+        loanId, scheduleId: r.id, paymentDate: r.dueDate, paymentType: "EMI" as const, amount: r.emiAmount,
+        principalComponent: principals[i], interestComponent: Decimal.max(r.emiAmount.minus(principals[i]), 0),
+        isOpening: true, notes: "Paid before FinSight360",
+      })),
+    });
+    await tx.loanAmortizationSchedule.updateMany({ where: { id: { in: paidRows.map((r) => r.id) } }, data: { status: "PAID" } });
+  }
+  if (extraPrincipal.greaterThan(0)) {
+    await tx.loanPayment.create({
+      data: { loanId, paymentDate: asOf, paymentType: "PREPAYMENT", amount: extraPrincipal, principalComponent: extraPrincipal, interestComponent: 0, isOpening: true, notes: "Extra principal repaid before FinSight360 (to match the lender's outstanding)" },
+    });
+  }
+  const updated = await syncLoanTotals(tx, loanId);
+  await rebuildFutureSchedule(tx, updated);
+  return updated;
+}
+
+/** Update "EMIs already paid" / "outstanding as per bank" for an existing loan. */
+export async function setLoanProgress(userId: string, loanId: string, input: unknown, meta: RequestMeta = NO_META, timezone = DEFAULT_TIMEZONE) {
+  const d = parseOrThrow(loanProgressSchema, input);
+  await ownedLoan(prisma, userId, loanId);
+  return prisma.$transaction(async (tx) => {
+    await lockLoan(tx, loanId);
+    const loan = await applyOpeningProgress(tx, loanId, d.emisPaid, d.outstandingAsPerBank === null ? null : toDecimal(d.outstandingAsPerBank), todayInTimezone(timezone));
+    await audit({ userId, action: AuditAction.LOAN_UPDATED, entityType: "Loan", entityId: loanId, ip: meta.ip, userAgent: meta.userAgent, metadata: { emisPaid: d.emisPaid, outstandingGiven: d.outstandingAsPerBank !== null } }, tx);
+    return loan;
   });
 }
 

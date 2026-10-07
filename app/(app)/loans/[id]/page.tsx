@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CalendarCheck, Landmark, PiggyBank, Receipt, TrendingDown } from "lucide-react";
+import { ArrowLeft, CalendarCheck, Landmark, PiggyBank, Receipt, TrendingDown, Wallet } from "lucide-react";
 import { requireUser } from "@/lib/auth/session";
 import { getLoanDetail } from "@/services/loan.service";
 import { getTransactionFormOptions } from "@/services/transaction.service";
 import { NotFoundError } from "@/lib/errors";
-import { formatMoney } from "@/lib/money";
+import { formatMoney, sum } from "@/lib/money";
 import { formatDate } from "@/lib/dates";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { StatCard } from "@/features/dashboard/components/stat-card";
-import { EditLoanDialog, LOAN_TYPE_LABEL, RecordLoanPaymentDialog, ReviseRateDialog } from "@/features/loans/loan-forms";
+import { EditLoanDialog, LOAN_TYPE_LABEL, LoanProgressDialog, RecordLoanPaymentDialog, ReviseRateDialog } from "@/features/loans/loan-forms";
 import { DeleteLoanButton, DeleteLoanPaymentButton } from "@/features/loans/loan-buttons";
 import { BalanceCurve, PrincipalInterestBars } from "@/features/loans/loan-charts";
 import { cn } from "@/lib/utils";
@@ -51,6 +51,14 @@ export default async function LoanDetailPage({ params, searchParams }: PageProps
     outstanding: loan.outstandingPrincipal.toFixed(2),
     nextInstallment: next ? { number: next.installmentNumber, dueDate: formatDate(next.dueDate), amount: next.emiAmount.toFixed(2) } : null,
   };
+  // Paid before FinSight360 (entered as "EMIs already paid" / lender outstanding) vs recorded here.
+  const opening = d.payments.filter((p) => p.isOpening);
+  const recorded = d.payments.filter((p) => !p.isOpening);
+  const openingEmis = opening.filter((p) => p.paymentType === "EMI").length;
+  const openingExtra = sum(opening.filter((p) => p.paymentType !== "EMI").map((p) => p.amount));
+  const openingTotal = sum(opening.map((p) => p.amount));
+  const paidTillDate = sum(d.payments.map((p) => p.amount));
+  const emisPaidCount = d.schedule.filter((r) => r.status === "PAID").length;
 
   return (
     <div className="space-y-6">
@@ -70,7 +78,8 @@ export default async function LoanDetailPage({ params, searchParams }: PageProps
         }
       />
 
-      <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4" aria-label="Loan analysis">
+      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-5" aria-label="Loan analysis">
+        <StatCard title="Paid till date" value={formatMoney(paidTillDate, { decimals: 0 })} icon={Wallet} sub={`${emisPaidCount} of ${d.schedule.length} EMIs paid${openingTotal.greaterThan(0) ? ` · ${formatMoney(openingTotal, { decimals: 0 })} before FinSight360` : ""}`} />
         <StatCard title="Outstanding principal" value={formatMoney(a.outstanding, { decimals: 0 })} icon={Landmark} tone="primary" sub={`of ${formatMoney(loan.originalPrincipal, { decimals: 0 })} borrowed`} />
         <StatCard title="Principal paid" value={formatMoney(a.principalPaid, { decimals: 0 })} icon={PiggyBank} sub={`${a.repaidPct.toFixed(1)}% repaid${loan.totalPrepayments.greaterThan(0) ? ` · prepaid ${formatMoney(loan.totalPrepayments, { decimals: 0 })}` : ""}`} />
         <StatCard title="Interest paid" value={formatMoney(a.interestPaid, { decimals: 0 })} icon={TrendingDown} sub={`This year ${formatMoney(a.interestPaidThisYear, { decimals: 0 })} · this month ${formatMoney(a.interestPaidThisMonth, { decimals: 0 })}`} />
@@ -157,7 +166,17 @@ export default async function LoanDetailPage({ params, searchParams }: PageProps
             <p className="text-sm text-muted-foreground">No payments recorded yet.</p>
           ) : (
             <ul className="divide-y">
-              {d.payments.map((p) => (
+              {opening.length > 0 && (
+                <li className="flex flex-wrap items-center gap-3 py-2.5 text-sm">
+                  <span className="w-24 text-muted-foreground">Before FinSight360</span>
+                  <Badge variant="outline">{openingEmis} EMI{openingEmis === 1 ? "" : "s"}{openingExtra.greaterThan(0) ? " + extra principal" : ""}</Badge>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    Principal {formatMoney(sum(opening.map((p) => p.principalComponent)), { decimals: 0 })} · interest {formatMoney(sum(opening.map((p) => p.interestComponent)), { decimals: 0 })} · not in ledger · change with Update repayment progress
+                  </span>
+                  <span className="tabular font-semibold">{formatMoney(openingTotal)}</span>
+                </li>
+              )}
+              {recorded.map((p) => (
                 <li key={p.id} className="flex flex-wrap items-center gap-3 py-2.5 text-sm">
                   <span className="w-24 text-muted-foreground">{formatDate(p.paymentDate)}</span>
                   <Badge variant={p.paymentType === "EMI" ? "secondary" : "default"}>{PAYMENT_LABEL[p.paymentType]}{p.schedule ? ` #${p.schedule.installmentNumber}` : ""}</Badge>
@@ -176,6 +195,12 @@ export default async function LoanDetailPage({ params, searchParams }: PageProps
       </Card>
 
       <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        <LoanProgressDialog
+          loanId={loan.id}
+          totalEmis={d.schedule.length}
+          hasRecordedPayments={recorded.length > 0}
+          defaults={{ emisPaid: openingEmis, outstandingAsPerBank: "" }}
+        />
         {active && <ReviseRateDialog loanId={loan.id} currentRate={loan.interestRate.toFixed(2)} />}
         {active && <RecordLoanPaymentDialog {...paymentProps} initialType="FORECLOSURE" label="Foreclose" variant="outline" size="sm" />}
         <EditLoanDialog

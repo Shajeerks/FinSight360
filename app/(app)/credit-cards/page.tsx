@@ -142,7 +142,7 @@ export default async function CreditCardsPage() {
                         defaults={{
                           bankName: c.bankName, cardName: c.cardName, network: c.network, last4: c.last4, creditLimit: c.creditLimit.toFixed(2),
                           statementDay: c.statementDay ?? "", paymentDueDay: c.paymentDueDay ?? "", currentOutstanding: c.currentOutstanding.toFixed(2),
-                          totalAmountDue: c.totalAmountDue.toFixed(2), minimumAmountDue: c.minimumAmountDue.toFixed(2), currentDueDate: toDateInput(c.currentDueDate),
+                          totalAmountDue: c.totalAmountDue.toFixed(2), minimumAmountDue: c.minimumAmountDue.toFixed(2), currentDueDate: toDateInput(c.currentDueDate), paidOnBill: c.paidOnBill.toFixed(2),
                           annualFee: c.annualFee.toFixed(2), rewardPoints: c.rewardPoints, status: c.status, notes: c.notes ?? "",
                         }}
                       />

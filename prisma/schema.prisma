@@ -607,6 +607,9 @@ model CreditCard {
   minimumAmountDue   Decimal     @default(0) @db.Decimal(18, 2)
   currentDueDate     DateTime?   @db.Date
   lastStatementDate  DateTime?   @db.Date
+  /// Already paid on the current bill outside FinSight360 (no ledger transaction).
+  /// Reduces the remaining due; reset when a new statement's due date is entered.
+  paidOnBill         Decimal     @default(0) @db.Decimal(18, 2)
   annualFee          Decimal     @default(0) @db.Decimal(18, 2)
   rewardPoints       Int         @default(0)
   currency           String      @default("INR") @db.Char(3)
@@ -710,6 +713,9 @@ model LoanPayment {
   notes              String?
   /// One ledger payment split over two instalments shares a groupId (= id of the first part).
   groupId            String?
+  /// Paid before the loan was tracked in FinSight360 (entered as "EMIs already paid" /
+  /// "outstanding as per bank"). Never linked to a ledger transaction.
+  isOpening          Boolean         @default(false)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   deletedAt          DateTime?

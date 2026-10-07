@@ -5,7 +5,7 @@ import { requireApiUser } from "@/lib/auth/session";
 import { runAction, assertIds } from "@/lib/api";
 import type { ActionResult } from "@/lib/errors";
 import { getRequestMeta } from "@/lib/security/request";
-import { createLoan, deleteLoan, deleteLoanPayment, previewEmi, recordLoanPayment, reviseInterestRate, updateLoanDetails } from "@/services/loan.service";
+import { createLoan, deleteLoan, deleteLoanPayment, previewEmi, recordLoanPayment, reviseInterestRate, setLoanProgress, updateLoanDetails } from "@/services/loan.service";
 
 function refresh(loanId?: string) {
   for (const p of ["/loans", "/dashboard", "/transactions", "/accounts", "/expenses"]) revalidatePath(p);
@@ -65,6 +65,14 @@ export async function reviseRateAction(loanId: string, input: unknown): Promise<
   assertIds(loanId);
   const { user, meta } = await ctx();
   const res = await runAction(() => reviseInterestRate(user.id, loanId, input, meta), "Interest rate revised; future EMIs re-calculated.");
+  if (res.ok) refresh(loanId);
+  return res;
+}
+
+export async function setLoanProgressAction(loanId: string, input: unknown): Promise<ActionResult> {
+  assertIds(loanId);
+  const { user, meta } = await ctx();
+  const res = await runAction(async () => void (await setLoanProgress(user.id, loanId, input, meta)), "Repayment progress updated and the schedule re-projected.");
   if (res.ok) refresh(loanId);
   return res;
 }

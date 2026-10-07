@@ -27,7 +27,7 @@ function CardForm({ id, defaults, onDone }: { id: string | null; defaults?: Part
     resolver: zodResolver(creditCardSchema),
     defaultValues: {
       bankName: "", cardName: "", network: "VISA", last4: "", creditLimit: "", statementDay: "", paymentDueDay: "",
-      currentOutstanding: "0", totalAmountDue: "0", minimumAmountDue: "0", currentDueDate: "", annualFee: "0", rewardPoints: 0, status: "ACTIVE", notes: "",
+      currentOutstanding: "0", totalAmountDue: "0", minimumAmountDue: "0", currentDueDate: "", paidOnBill: "0", annualFee: "0", rewardPoints: 0, status: "ACTIVE", notes: "",
       ...defaults,
     },
   });
@@ -83,7 +83,7 @@ function CardForm({ id, defaults, onDone }: { id: string | null; defaults?: Part
         </FormField>
       </div>
 
-      <fieldset className="grid gap-4 rounded-lg border p-3 sm:grid-cols-3">
+      <fieldset className="grid gap-4 rounded-lg border p-3 sm:grid-cols-2">
         <legend className="px-1 text-sm font-medium">Latest statement</legend>
         <FormField id="totalAmountDue" label="Total due (₹)" error={errors.totalAmountDue?.message}>
           <Input id="totalAmountDue" inputMode="decimal" {...form.register("totalAmountDue")} />
@@ -93,6 +93,9 @@ function CardForm({ id, defaults, onDone }: { id: string | null; defaults?: Part
         </FormField>
         <FormField id="currentDueDate" label="Due date" error={errors.currentDueDate?.message}>
           <Input id="currentDueDate" type="date" {...form.register("currentDueDate")} />
+        </FormField>
+        <FormField id="paidOnBill" label="Already paid on this bill (₹)" hint="Paid before using FinSight360 or outside it. Updates the remaining due only — no bank transaction is created." error={errors.paidOnBill?.message}>
+          <Input id="paidOnBill" inputMode="decimal" {...form.register("paidOnBill")} />
         </FormField>
       </fieldset>
 

@@ -18,6 +18,8 @@ export const creditCardSchema = z
     totalAmountDue: nonNegativeMoney.default("0"),
     minimumAmountDue: nonNegativeMoney.default("0"),
     currentDueDate: optionalDate,
+    /** Already paid on this bill outside FinSight360 (no bank transaction is created). */
+    paidOnBill: nonNegativeMoney.default("0"),
     annualFee: nonNegativeMoney.default("0"),
     rewardPoints: z.coerce.number().int().min(0).max(1_000_000_000).default(0),
     status: z.enum(CARD_STATUSES).default("ACTIVE"),
@@ -26,6 +28,9 @@ export const creditCardSchema = z
   .superRefine((v, ctx) => {
     if (Number(v.minimumAmountDue) > Number(v.totalAmountDue)) {
       ctx.addIssue({ code: "custom", path: ["minimumAmountDue"], message: "Minimum due can't exceed total due" });
+    }
+    if (Number(v.paidOnBill) > Number(v.totalAmountDue)) {
+      ctx.addIssue({ code: "custom", path: ["paidOnBill"], message: "Can't be more than the total due" });
     }
   });
 

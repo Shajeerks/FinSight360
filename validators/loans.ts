@@ -12,6 +12,11 @@ const rateSchema = z
   .refine((v) => /^\d{1,2}(\.\d{1,4})?$/.test(v) && Number(v) >= 0 && Number(v) <= 60, "Enter an annual rate between 0 and 60% (up to 4 decimals)");
 
 const optionalMoney = z.union([moneySchema, z.literal(""), z.null()]).optional().transform((v) => (v ? v : null));
+const optionalCount = z
+  .union([z.string(), z.number(), z.null()])
+  .optional()
+  .transform((v) => (v === null || v === undefined || String(v).trim() === "" ? null : Number(String(v).trim())))
+  .refine((v) => v === null || (Number.isInteger(v) && v >= 0 && v <= 600), "Enter a whole number of EMIs (0–600)");
 
 export const loanSchema = z
   .object({
@@ -32,6 +37,10 @@ export const loanSchema = z
     repaymentAccountId: optionalId,
     /** For loans that started before you used FinSight360: mark past EMIs as paid (no ledger entries are created). */
     markPastAsPaid: boolField,
+    /** How many EMIs were already paid before FinSight360 (overrides markPastAsPaid when given). */
+    emisPaid: optionalCount,
+    /** Outstanding principal as shown by the lender today (optional). */
+    outstandingAsPerBank: optionalMoney,
     notes: optionalText(500),
   })
   .superRefine((v, ctx) => {
@@ -84,3 +93,10 @@ export type LoanInput = z.input<typeof loanSchema>;
 export type LoanDetailsInput = z.input<typeof loanDetailsSchema>;
 export type LoanPaymentInput = z.input<typeof loanPaymentSchema>;
 export type RateRevisionInput = z.input<typeof rateRevisionSchema>;
+export type LoanProgressInput = z.input<typeof loanProgressSchema>;
+
+/** Repayment progress made before the loan was tracked in FinSight360. */
+export const loanProgressSchema = z.object({
+  emisPaid: z.coerce.number({ message: "Enter how many EMIs you've paid" }).int("Whole EMIs only").min(0, "Can't be negative").max(600),
+  outstandingAsPerBank: optionalMoney,
+});
