@@ -32,6 +32,7 @@ function cardData(data: ReturnType<typeof creditCardSchema.parse>) {
     totalAmountDue: roundMoney(data.totalAmountDue),
     minimumAmountDue: roundMoney(data.minimumAmountDue),
     currentDueDate: data.currentDueDate,
+    paidOnBill: roundMoney(data.paidOnBill),
     annualFee: roundMoney(data.annualFee),
     rewardPoints: data.rewardPoints,
     status: data.status,
@@ -52,10 +53,15 @@ export async function createCreditCard(userId: string, input: unknown, meta: Req
 
 export async function updateCreditCard(userId: string, id: string, input: unknown, meta: RequestMeta = NO_META) {
   const data = parseOrThrow(creditCardSchema, input);
-  await getCreditCard(userId, id);
+  const before = await getCreditCard(userId, id);
+  // A new bill (different due date) starts with nothing paid on it — unless the
+  // user changed "already paid" in the same edit.
+  const sameDue = (before.currentDueDate?.getTime() ?? null) === (data.currentDueDate?.getTime() ?? null);
+  const paidUnchanged = (before.paidOnBill ?? 0).equals(roundMoney(data.paidOnBill));
+  const paidOnBill = !sameDue && paidUnchanged ? new Decimal(0) : roundMoney(data.paidOnBill);
   return prisma.$transaction(async (tx) => {
     const net = await ledgerNet(tx, { kind: "card", id, userId });
-    await tx.creditCard.update({ where: { id }, data: { ...cardData(data), openingOutstanding: openingForTarget(data.currentOutstanding, net) } });
+    await tx.creditCard.update({ where: { id }, data: { ...cardData(data), paidOnBill, openingOutstanding: openingForTarget(data.currentOutstanding, net) } });
     await recomputeCardOutstanding(tx, id);
     await audit({ userId, action: AuditAction.CARD_UPDATED, entityType: "CreditCard", entityId: id, ip: meta.ip, userAgent: meta.userAgent }, tx);
     return tx.creditCard.findUniqueOrThrow({ where: { id } });
@@ -87,7 +93,8 @@ export async function getCreditCardOverview(userId: string, timezone = "Asia/Kol
         where: countableWhere(userId, { creditCardId: c.id, transactionType: "CARD_PAYMENT", transactionDate: { gte: cycleStart } }),
         _sum: { amount: true },
       });
-      const paidThisCycle = roundMoney(paid._sum.amount ?? 0);
+      // Payments recorded in FinSight360 this cycle + what the user says was paid outside it.
+      const paidThisCycle = roundMoney(toDecimal(paid._sum.amount ?? 0).plus(c.paidOnBill ?? 0));
       const remainingDue = Decimal.max(c.totalAmountDue.minus(paidThisCycle), 0);
       const remainingMinimum = Decimal.max(c.minimumAmountDue.minus(paidThisCycle), 0);
       const due = cardDueInfo({ dueDate, totalAmountDue: remainingDue }, today);
