@@ -17,7 +17,7 @@ export type ParsedEmailTxn = {
   bank: string | null;
   amount: string;
   direction: "DEBIT" | "CREDIT";
-  transactionType: "EXPENSE" | "INCOME" | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "EMI" | "INVESTMENT" | "CARD_PAYMENT" | "TRANSFER";
+  transactionType: "EXPENSE" | "INCOME" | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "EMI" | "INVESTMENT" | "CARD_PAYMENT" | "TRANSFER" | "BORROWING";
   /** Which instrument the money moved on. "debit-card" = a bank account we can't identify from the card digits. */
   instrument: "bank" | "card" | "debit-card" | "unknown";
   accountLast4: string | null;

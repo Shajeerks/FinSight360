@@ -83,6 +83,10 @@ export async function suggestCategory(
 ): Promise<{ categoryId: string | null; subCategoryId: string | null }> {
   if (row.transactionType === "CARD_PAYMENT") return (await systemCategory(db, "Transfer", "Credit Card Payment")) ?? { categoryId: null, subCategoryId: null };
   if (row.transactionType === "TRANSFER") return (await systemCategory(db, "Transfer", "Own Account")) ?? { categoryId: null, subCategoryId: null };
+  if (row.transactionType === "BORROWING") {
+    const sub = row.direction === "CREDIT" && /DISB|DISBURS/i.test(row.description) ? "Loan disbursed (bank / NBFC)" : undefined;
+    return (await systemCategory(db, "Loans & Borrowing", sub)) ?? { categoryId: null, subCategoryId: null };
+  }
   const allowed = allowedKindsFor(row.transactionType, row.direction);
   const key = merchantKey(row.merchantName);
   const merchant = key ? await db.merchant.findUnique({ where: { userId_normalizedName: { userId, normalizedName: key } } }) : null;

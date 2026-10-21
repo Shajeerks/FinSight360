@@ -13,12 +13,17 @@ export function accountBalance(opening: MoneyInput, entries: BalanceEntry[]): De
  * Credit card: opening + purchases/fees (debits) − refunds (credits) − bill payments.
  * A bill payment is stored once as a CARD_PAYMENT debit on the bank account that
  * also references the card, so for the card it always reduces the outstanding.
+ * Likewise a card-to-bank transfer is one BORROWING credit on the bank that also
+ * references the card, so for the card it always increases the outstanding.
  */
 export function cardOutstanding(opening: MoneyInput, entries: BalanceEntry[]): Decimal {
   let out = toDecimal(opening);
   for (const e of entries) {
     const amt = toDecimal(e.amount);
     if (e.transactionType === "CARD_PAYMENT") out = out.minus(amt);
+    // Money taken from the card into a bank/cash account (stored once as a
+    // BORROWING credit on that account that also references the card).
+    else if (e.transactionType === "BORROWING") out = out.plus(amt);
     else if (e.direction === "DEBIT") out = out.plus(amt);
     else out = out.minus(amt);
   }

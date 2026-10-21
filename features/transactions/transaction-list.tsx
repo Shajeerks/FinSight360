@@ -15,6 +15,10 @@ function accountLabel(t: TransactionRow) {
     const from = t.bankAccount?.nickname ?? t.cashAccount?.name ?? "";
     return `${from} → ${t.creditCard.bankName} ••${t.creditCard.last4}`;
   }
+  if (t.transactionType === "BORROWING" && t.creditCard) {
+    const to = t.bankAccount?.nickname ?? t.cashAccount?.name ?? "";
+    return `${t.creditCard.bankName} ••${t.creditCard.last4} → ${to}`;
+  }
   if (t.creditCard) return `${t.creditCard.bankName} ${t.creditCard.cardName} ••${t.creditCard.last4}`;
   if (t.bankAccount) return `${t.bankAccount.nickname}${t.bankAccount.last4 ? ` ••${t.bankAccount.last4}` : ""}`;
   if (t.cashAccount) return `${t.cashAccount.name} (cash)`;
@@ -23,7 +27,7 @@ function accountLabel(t: TransactionRow) {
 
 function Amount({ t }: { t: TransactionRow }) {
   const credit = t.direction === "CREDIT";
-  const neutral = t.transactionType === "TRANSFER" || t.transactionType === "CARD_PAYMENT";
+  const neutral = t.transactionType === "TRANSFER" || t.transactionType === "CARD_PAYMENT" || t.transactionType === "BORROWING";
   return (
     <span className={cn("tabular whitespace-nowrap font-semibold", neutral ? "text-foreground" : credit ? "text-success" : "text-foreground")}>
       {credit ? "+" : "−"}

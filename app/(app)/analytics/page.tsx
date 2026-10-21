@@ -48,7 +48,7 @@ export default async function AnalyticsPage(props: PageProps<"/analytics">) {
       <PageHeader title="Monthly Analysis" description={`How ${monthLabel(ym)} compares, where the money went, and what repeats.`} actions={<MonthSwitcher month={ym} current={now} basePath="/analytics" />} />
 
       <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4" aria-label="Month summary">
-        <StatCard title="Income" value={formatMoney(s.income, { decimals: 0 })} icon={Wallet} sub={<Delta value={a.comparison.income} goodWhenUp />} />
+        <StatCard title="Income" value={formatMoney(s.income, { decimals: 0 })} icon={Wallet} sub={<><Delta value={a.comparison.income} goodWhenUp />{s.borrowed.greaterThan(0) && <span>· + {formatMoney(s.borrowed, { decimals: 0 })} borrowed</span>}</>} />
         <StatCard title="Expenses" value={formatMoney(s.expenses, { decimals: 0 })} icon={Receipt} sub={<Delta value={a.comparison.expenses} goodWhenUp={false} />} />
         <StatCard title="Savings" value={formatMoney(s.savings, { decimals: 0 })} icon={PiggyBank} tone={s.savings.lessThan(0) ? "danger" : "primary"} sub={a.ratios.savingsRate === null ? "—" : `${a.ratios.savingsRate}% of income`} />
         <StatCard title="EMI burden" value={a.ratios.emiRate === null ? "—" : `${a.ratios.emiRate}%`} icon={Landmark} tone={(a.ratios.emiRate ?? 0) > 40 ? "danger" : "default"} sub={`${formatMoney(s.emi, { decimals: 0 })} EMI · invested ${a.ratios.investmentRate ?? 0}%`} />

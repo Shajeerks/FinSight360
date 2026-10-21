@@ -47,7 +47,7 @@ export const columnMappingSchema = z
 
 export type ColumnMappingData = z.output<typeof columnMappingSchema>;
 
-export const IMPORT_TYPES = ["EXPENSE", "INCOME", "REFUND", "REVERSAL", "INTEREST", "FEE", "ATM_WITHDRAWAL", "EMI", "INVESTMENT", "CARD_PAYMENT", "OTHER"] as const;
+export const IMPORT_TYPES = ["EXPENSE", "INCOME", "REFUND", "REVERSAL", "INTEREST", "FEE", "ATM_WITHDRAWAL", "EMI", "INVESTMENT", "CARD_PAYMENT", "BORROWING", "OTHER"] as const;
 
 export const importRowUpdateSchema = z.object({
   include: z.boolean().optional(),

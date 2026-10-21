@@ -35,6 +35,7 @@ function today() {
 
 const KIND_GROUPS: { label: string; kinds: TransactionKind[] }[] = [
   { label: "Common", kinds: ["EXPENSE", "INCOME", "TRANSFER", "CARD_PAYMENT"] },
+  { label: "Loans & borrowing (not income / expense)", kinds: ["BORROWED", "LENT"] },
   { label: "Other", kinds: ["EMI", "INVESTMENT", "REFUND", "INTEREST", "FEE", "ATM_WITHDRAWAL", "REVERSAL", "OTHER_DEBIT", "OTHER_CREDIT"] },
 ];
 
@@ -68,7 +69,8 @@ export function TransactionForm({
       amount: "",
       account: firstAccount(initialKind),
       toAccount: "",
-      creditCardId: options.cards[0]?.id ?? "",
+      // A borrowing is only "from a credit card" when the user picks one.
+      creditCardId: initialKind === "BORROWED" ? "" : (options.cards[0]?.id ?? ""),
       description: "",
       merchantName: "",
       categoryId: "",
@@ -104,6 +106,8 @@ export function TransactionForm({
     const ref = parseAccountRef(form.getValues("account"));
     if (!ref || !spec.accounts.includes(ref.kind)) form.setValue("account", firstAccount(kind));
     if (kind === "INCOME" && !form.getValues("incomeCategory")) form.setValue("incomeCategory", "SALARY");
+    if (kind === "BORROWED" && kind !== initialKind) form.setValue("creditCardId", "");
+    if (kind === "CARD_PAYMENT" && !form.getValues("creditCardId")) form.setValue("creditCardId", options.cards[0]?.id ?? "");
     const cat = options.categories.find((c) => c.id === form.getValues("categoryId"));
     if (cat && !catKinds.includes(cat.kind as "EXPENSE")) {
       form.setValue("categoryId", "");
@@ -182,6 +186,21 @@ export function TransactionForm({
             ))}
           </NativeSelect>
         </FormField>
+      )}
+
+      {kind === "BORROWED" && options.cards.length > 0 && (
+        <FormField id="creditCardId" label="Taken from a credit card?" hint="Pick the card if this money came from it (card-to-bank transfer or cash on the card) — its outstanding goes up by this amount." error={errors.creditCardId?.message}>
+          <NativeSelect id="creditCardId" {...form.register("creditCardId")}>
+            <option value="">No — a loan, a person, or money I lent coming back</option>
+            {options.cards.map((c) => (
+              <option key={c.id} value={c.id}>{c.label}</option>
+            ))}
+          </NativeSelect>
+        </FormField>
+      )}
+
+      {(kind === "BORROWED" || kind === "LENT") && (
+        <p className="-mt-1 rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{spec.help}</p>
       )}
 
       {kind === "CARD_PAYMENT" && (

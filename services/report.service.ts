@@ -144,19 +144,21 @@ export async function buildReport(userId: string, input: unknown): Promise<Repor
         const val = (pred: (x: (typeof g)[number]) => boolean) => g.filter(pred).reduce((a, x) => a.plus(x._sum.amount ?? 0), new Decimal(0));
         const purchases = val((x) => x.direction === "DEBIT" && x.transactionType !== "CARD_PAYMENT" && x.transactionType !== "FEE");
         const fees = val((x) => x.direction === "DEBIT" && x.transactionType === "FEE");
-        const refunds = val((x) => x.direction === "CREDIT" && x.transactionType !== "CARD_PAYMENT");
+        const refunds = val((x) => x.direction === "CREDIT" && x.transactionType !== "CARD_PAYMENT" && x.transactionType !== "BORROWING");
         const payments = val((x) => x.transactionType === "CARD_PAYMENT");
+        // Money taken from the card into a bank / cash account (card-to-bank, cash).
+        const cashTaken = val((x) => x.transactionType === "BORROWING");
         out.push({
-          card: `${c.bankName} ${c.cardName} ••${c.last4}`, purchases: money(purchases), fees: money(fees), refunds: money(refunds), payments: money(payments),
+          card: `${c.bankName} ${c.cardName} ••${c.last4}`, purchases: money(purchases), cashTaken: money(cashTaken), fees: money(fees), refunds: money(refunds), payments: money(payments),
           outstanding: money(c.currentOutstanding), limit: money(c.creditLimit),
           utilization: c.creditLimit.isZero() ? 0 : c.currentOutstanding.dividedBy(c.creditLimit).times(100).toDecimalPlaces(1).toNumber(),
         });
       }
       return {
         ...base,
-        columns: [{ key: "card", label: "Card", kind: "text" }, { key: "purchases", label: "Purchases", kind: "money" }, { key: "fees", label: "Fees", kind: "money" }, { key: "refunds", label: "Refunds", kind: "money" }, { key: "payments", label: "Payments", kind: "money" }, { key: "outstanding", label: "Outstanding now", kind: "money" }, { key: "limit", label: "Limit", kind: "money" }, { key: "utilization", label: "Utilization %", kind: "percent" }],
+        columns: [{ key: "card", label: "Card", kind: "text" }, { key: "purchases", label: "Purchases", kind: "money" }, { key: "cashTaken", label: "Cash / transfers out", kind: "money" }, { key: "fees", label: "Fees", kind: "money" }, { key: "refunds", label: "Refunds", kind: "money" }, { key: "payments", label: "Payments", kind: "money" }, { key: "outstanding", label: "Outstanding now", kind: "money" }, { key: "limit", label: "Limit", kind: "money" }, { key: "utilization", label: "Utilization %", kind: "percent" }],
         rows: out,
-        totals: { card: "Total", purchases: sumCol(out, "purchases"), fees: sumCol(out, "fees"), refunds: sumCol(out, "refunds"), payments: sumCol(out, "payments"), outstanding: sumCol(out, "outstanding"), limit: sumCol(out, "limit") },
+        totals: { card: "Total", purchases: sumCol(out, "purchases"), cashTaken: sumCol(out, "cashTaken"), fees: sumCol(out, "fees"), refunds: sumCol(out, "refunds"), payments: sumCol(out, "payments"), outstanding: sumCol(out, "outstanding"), limit: sumCol(out, "limit") },
       };
     }
     case "loans":

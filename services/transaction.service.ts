@@ -39,8 +39,8 @@ function defaultPaymentMethod(kind: "bank" | "card" | "cash"): PaymentMethod {
   return kind === "card" ? "CREDIT_CARD" : kind === "cash" ? "CASH" : "UPI";
 }
 
-async function systemCategory(tx: Tx, kind: "TRANSFER", name: string, sub: string) {
-  const cat = await tx.category.findFirst({ where: { userId: null, kind, name, deletedAt: null }, include: { subCategories: { where: { name: sub } } } });
+async function systemCategory(tx: Tx, kind: "TRANSFER", name: string, sub?: string) {
+  const cat = await tx.category.findFirst({ where: { userId: null, kind, name, deletedAt: null }, include: { subCategories: { where: { name: sub ?? "__none__" } } } });
   return { categoryId: cat?.id ?? null, subCategoryId: cat?.subCategories[0]?.id ?? null };
 }
 
@@ -94,6 +94,11 @@ async function resolve(tx: Tx, userId: string, data: TransactionData, existingRe
     to = { kind: "card", id: data.creditCardId! };
     await check(to);
   }
+  // Money taken from a credit card (card-to-bank transfer / cash): the card is the source.
+  if (data.kind === "BORROWED" && data.creditCardId) {
+    to = { kind: "card", id: data.creditCardId };
+    await check(to);
+  }
 
   const allowed = allowedKindsFor(spec.type, spec.direction);
   let categoryId = data.categoryId;
@@ -113,6 +118,10 @@ async function resolve(tx: Tx, userId: string, data: TransactionData, existingRe
   if (!categoryId) {
     if (data.kind === "TRANSFER") ({ categoryId, subCategoryId } = await systemCategory(tx, "TRANSFER", "Transfer", "Own Account"));
     else if (data.kind === "CARD_PAYMENT") ({ categoryId, subCategoryId } = await systemCategory(tx, "TRANSFER", "Transfer", "Credit Card Payment"));
+    else if (data.kind === "BORROWED" || data.kind === "LENT") {
+      const sub = data.kind === "BORROWED" && to?.kind === "card" ? "Credit card to bank / cash" : undefined;
+      ({ categoryId, subCategoryId } = await systemCategory(tx, "TRANSFER", "Loans & Borrowing", sub));
+    }
     else {
       const defaultCat = merchant?.defaultCategoryId
         ? await tx.category.findFirst({ where: { id: merchant.defaultCategoryId, deletedAt: null }, select: { kind: true } })
@@ -196,7 +205,7 @@ async function insertLegs(tx: Tx, userId: string, data: TransactionData, r: Reso
     created.push(await tx.transaction.create({ data: { ...common, ...accountColumns(r.to), direction: "CREDIT", transferGroupId } }));
   } else {
     const cols = accountColumns(r.from);
-    if (data.kind === "CARD_PAYMENT" && r.to) cols.creditCardId = r.to.id;
+    if ((data.kind === "CARD_PAYMENT" || data.kind === "BORROWED") && r.to) cols.creditCardId = r.to.id;
     created.push(await tx.transaction.create({ data: { ...common, ...cols, direction: r.spec.direction as TransactionDirection } }));
   }
   if (!carry.sourceType) {
@@ -291,7 +300,7 @@ export async function updateTransaction(userId: string, id: string, input: unkno
       result = created[0];
     } else {
       const cols = accountColumns(r.from);
-      if (data.kind === "CARD_PAYMENT" && r.to) cols.creditCardId = r.to.id;
+      if ((data.kind === "CARD_PAYMENT" || data.kind === "BORROWED") && r.to) cols.creditCardId = r.to.id;
       result = await tx.transaction.update({
         where: { id: t.id },
         data: { ...baseFields(data, r), ...cols, direction: r.spec.direction as TransactionDirection },
@@ -442,9 +451,9 @@ export function toFormValues(t: Awaited<ReturnType<typeof getTransaction>>) {
     kind: isTransfer ? ("TRANSFER" as const) : kind,
     transactionDate: t.transactionDate.toISOString().slice(0, 10),
     amount: t.amount.toFixed(2),
-    account: kind === "CARD_PAYMENT" ? (t.bankAccountId ? `bank:${t.bankAccountId}` : `cash:${t.cashAccountId}`) : refOf(debitLeg),
+    account: (kind === "CARD_PAYMENT" || (kind === "BORROWED" && t.creditCardId)) ? (t.bankAccountId ? `bank:${t.bankAccountId}` : `cash:${t.cashAccountId}`) : refOf(debitLeg),
     toAccount: creditLeg ? refOf(creditLeg) : "",
-    creditCardId: kind === "CARD_PAYMENT" ? (t.creditCardId ?? "") : "",
+    creditCardId: kind === "CARD_PAYMENT" || kind === "BORROWED" ? (t.creditCardId ?? "") : "",
     description: t.description,
     merchantName: t.merchantName ?? "",
     categoryId: t.categoryId ?? "",

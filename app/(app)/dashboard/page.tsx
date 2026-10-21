@@ -79,7 +79,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/dashbo
 
       {/* This month */}
       <section aria-label="This month" className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-        <StatCard title="Income" value={money0(c.income)} icon={ArrowDownCircle} trend={trend(c.income, d.previous.income, "up")} />
+        <StatCard title="Income" value={money0(c.income)} icon={ArrowDownCircle} trend={trend(c.income, d.previous.income, "up")} sub={c.borrowed.greaterThan(0) ? `+ ${money0(c.borrowed)} borrowed (not income)` : undefined} />
         <StatCard title="Expenses" value={money0(c.expenses)} icon={ArrowUpCircle} trend={trend(c.expenses, d.previous.expenses, "down")} />
         <StatCard title="EMI Paid" value={money0(c.emi)} icon={Banknote} sub={c.interestPaid.isZero() ? `Monthly commitment ${money0(d.monthlyEmiCommitment)}` : `Interest ${money0(c.interestPaid)} · Principal ${money0(c.principalPaid)}`} />
         <StatCard

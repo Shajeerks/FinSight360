@@ -11,6 +11,7 @@ export function accountLabelOf(t: Acct): string {
   const card = t.creditCard ? `${t.creditCard.bankName} ${t.creditCard.cardName} ••${t.creditCard.last4}` : null;
   const cash = t.cashAccount ? `${t.cashAccount.name} (cash)` : null;
   if (t.transactionType === "CARD_PAYMENT" && card) return `${bank ?? cash ?? "?"} → ${card}`;
+  if (t.transactionType === "BORROWING" && card) return `${card} → ${bank ?? cash ?? "?"}`;
   return card ?? bank ?? cash ?? "—";
 }
 

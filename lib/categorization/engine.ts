@@ -90,7 +90,7 @@ export function categorize(
 
 /** Which category kinds fit a transaction type/direction. */
 export function allowedKindsFor(transactionType: string, direction: "DEBIT" | "CREDIT"): CategoryKindValue[] {
-  if (transactionType === "TRANSFER" || transactionType === "CARD_PAYMENT") return ["TRANSFER"];
+  if (transactionType === "TRANSFER" || transactionType === "CARD_PAYMENT" || transactionType === "BORROWING") return ["TRANSFER"];
   if (direction === "CREDIT") {
     if (transactionType === "REFUND" || transactionType === "REVERSAL") return ["EXPENSE"];
     return ["INCOME"];

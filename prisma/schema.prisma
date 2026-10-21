@@ -124,6 +124,10 @@ enum TransactionType {
   INTEREST
   FEE
   ATM_WITHDRAWAL
+  /// Loan / borrowed money received (CREDIT) or lent / borrowing repaid (DEBIT).
+  /// Moves money but is never income or expense. With a creditCardId on a CREDIT
+  /// row the money came from that card (card-to-bank) and raises its outstanding.
+  BORROWING
   OTHER
 }
 

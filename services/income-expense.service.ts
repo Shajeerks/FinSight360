@@ -39,6 +39,8 @@ export async function getIncomeOverview(userId: string, ym: YearMonth, page = 1)
   const total = current.income;
   return {
     total,
+    /** Loans / borrowed money received this month — kept out of income. */
+    borrowed: current.borrowed,
     previousTotal: previous.income,
     change: previous.income.isZero() ? null : percentOf(total.minus(previous.income), previous.income, 1),
     byCategory: [...byCategory.entries()].map(([k, v]) => ({ key: k, amount: roundMoney(v), share: percentOf(v, total, 1) })).sort((a, b) => b.amount.comparedTo(a.amount)),

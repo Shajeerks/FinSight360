@@ -474,7 +474,7 @@ export async function updateImportRow(userId: string, importId: string, rowId: s
   if (d.include !== undefined) data.include = d.include;
   if (d.transactionType && d.transactionType !== row.transactionType) {
     const direction = row.direction ?? "DEBIT";
-    const allowed = ["INCOME", "INTEREST", "REFUND", "REVERSAL"].includes(d.transactionType) ? "CREDIT" : d.transactionType === "OTHER" || d.transactionType === "CARD_PAYMENT" ? direction : "DEBIT";
+    const allowed = ["INCOME", "INTEREST", "REFUND", "REVERSAL"].includes(d.transactionType) ? "CREDIT" : d.transactionType === "OTHER" || d.transactionType === "CARD_PAYMENT" || d.transactionType === "BORROWING" ? direction : "DEBIT";
     if (allowed !== direction) throw new AppError(`A ${direction === "DEBIT" ? "money-out" : "money-in"} row can't be marked as ${d.transactionType.toLowerCase().replace("_", " ")}.`, 400, "INVALID_TYPE", { transactionType: ["Not valid for this row's direction"] });
     data.transactionType = d.transactionType;
     data.merchantName = merchantFor(d.transactionType, row.description ?? "");

@@ -36,6 +36,10 @@ export const DEFAULT_CATEGORIES: DefaultCategory[] = [
   { name: "Investment Income", kind: "INCOME", icon: "line-chart", color: "#34d399", subCategories: ["Dividends", "Capital Gains"] },
   { name: "Other Income", kind: "INCOME", icon: "plus-circle", color: "#a3e635", subCategories: ["Refunds", "Cashback", "Gifts"] },
   { name: "Transfer", kind: "TRANSFER", icon: "arrow-left-right", color: "#94a3b8", subCategories: ["Own Account", "Credit Card Payment"] },
+  {
+    name: "Loans & Borrowing", kind: "TRANSFER", icon: "hand-coins", color: "#0891b2",
+    subCategories: ["Loan disbursed (bank / NBFC)", "Borrowed from a person", "Credit card to bank / cash", "Money I lent, returned", "Lent to someone", "Borrowed money repaid"],
+  },
 ];
 
 export type DefaultRule = {

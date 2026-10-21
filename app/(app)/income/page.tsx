@@ -40,6 +40,7 @@ export default async function IncomePage({ searchParams }: PageProps<"/income">)
           icon={Wallet}
           tone="primary"
           trend={o.change ? { pct: o.change.toNumber(), goodWhen: "up", label: "vs last month" } : null}
+          sub={o.borrowed.greaterThan(0) ? `+ ${formatMoney(o.borrowed, { decimals: 0 })} borrowed, not counted` : undefined}
         />
         <Card className="sm:col-span-2">
           <CardHeader className="pb-2"><CardTitle>By income type</CardTitle></CardHeader>

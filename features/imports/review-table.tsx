@@ -33,8 +33,8 @@ export type ReviewRow = {
 type Category = { id: string; name: string; kind: string; subCategories: { id: string; name: string }[] };
 
 const TYPE_OPTIONS: Record<"DEBIT" | "CREDIT", [string, string][]> = {
-  DEBIT: [["EXPENSE", "Expense"], ["FEE", "Fee / charge"], ["ATM_WITHDRAWAL", "ATM / cash"], ["EMI", "Loan EMI"], ["INVESTMENT", "Investment"], ["CARD_PAYMENT", "Card bill payment"], ["OTHER", "Other (money out)"]],
-  CREDIT: [["INCOME", "Income"], ["REFUND", "Refund"], ["REVERSAL", "Reversal"], ["INTEREST", "Interest"], ["CARD_PAYMENT", "Card payment received"], ["OTHER", "Other (money in)"]],
+  DEBIT: [["EXPENSE", "Expense"], ["FEE", "Fee / charge"], ["ATM_WITHDRAWAL", "ATM / cash"], ["EMI", "Loan EMI"], ["INVESTMENT", "Investment"], ["CARD_PAYMENT", "Card bill payment"], ["BORROWING", "Lent / borrowing repaid (not expense)"], ["OTHER", "Other (money out)"]],
+  CREDIT: [["INCOME", "Income"], ["REFUND", "Refund"], ["REVERSAL", "Reversal"], ["INTEREST", "Interest"], ["CARD_PAYMENT", "Card payment received"], ["BORROWING", "Loan / borrowing received (not income)"], ["OTHER", "Other (money in)"]],
 };
 
 const STATUS_BADGE: Record<string, React.ReactNode> = {
@@ -55,7 +55,7 @@ const FILTERS = [
 ] as const;
 
 function categoryKindsFor(type: string | null, direction: string | null) {
-  if (type === "CARD_PAYMENT" || type === "TRANSFER") return ["TRANSFER"];
+  if (type === "CARD_PAYMENT" || type === "TRANSFER" || type === "BORROWING") return ["TRANSFER"];
   if (direction === "CREDIT") return type === "REFUND" || type === "REVERSAL" ? ["EXPENSE"] : ["INCOME"];
   return ["EXPENSE"];
 }

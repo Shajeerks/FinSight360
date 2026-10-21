@@ -6,7 +6,7 @@ export type LedgerEntry = {
   direction: "DEBIT" | "CREDIT";
   transactionType:
     | "INCOME" | "EXPENSE" | "TRANSFER" | "CARD_PAYMENT" | "EMI" | "INVESTMENT"
-    | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "OTHER";
+    | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "BORROWING" | "OTHER";
 };
 
 export type LoanSplit = { principal: MoneyInput; interest: MoneyInput };
@@ -19,6 +19,10 @@ export type MonthlySummary = {
   interestPaid: Decimal;
   investments: Decimal;
   creditCardPayments: Decimal;
+  /** Loans / borrowed money received this month — shown separately, never income. */
+  borrowed: Decimal;
+  /** Money lent or borrowings repaid this month — shown separately, never expenses. */
+  lentOrRepaid: Decimal;
   /** income − expenses − EMI (money not consumed; includes what was invested) */
   savings: Decimal;
   savingsRatePct: Decimal;
@@ -36,6 +40,8 @@ export type MonthlySummary = {
  *    (card purchases are already counted when made — counting the bill payment
  *    again would double count).
  *  • TRANSFER between own accounts is ignored.
+ *  • BORROWING (loans / borrowed money in, lending / repaying a person out) moves
+ *    money but is neither income nor expense; it is reported on its own.
  */
 export function computeMonthlySummary(entries: LedgerEntry[], loanSplits: LoanSplit[] = []): MonthlySummary {
   let income = new Decimal(0);
@@ -43,6 +49,8 @@ export function computeMonthlySummary(entries: LedgerEntry[], loanSplits: LoanSp
   let emi = new Decimal(0);
   let investments = new Decimal(0);
   let cardPayments = new Decimal(0);
+  let borrowed = new Decimal(0);
+  let lentOrRepaid = new Decimal(0);
 
   for (const e of entries) {
     const amt = toDecimal(e.amount);
@@ -54,6 +62,10 @@ export function computeMonthlySummary(entries: LedgerEntry[], loanSplits: LoanSp
     else if (d === "DEBIT" && t === "EMI") emi = emi.plus(amt);
     else if (d === "DEBIT" && t === "INVESTMENT") investments = investments.plus(amt);
     else if (d === "DEBIT" && t === "CARD_PAYMENT") cardPayments = cardPayments.plus(amt);
+    else if (t === "BORROWING") {
+      if (d === "CREDIT") borrowed = borrowed.plus(amt);
+      else lentOrRepaid = lentOrRepaid.plus(amt);
+    }
   }
 
   const principalPaid = loanSplits.reduce((a, s) => a.plus(toDecimal(s.principal)), new Decimal(0));
@@ -69,6 +81,8 @@ export function computeMonthlySummary(entries: LedgerEntry[], loanSplits: LoanSp
     interestPaid: roundMoney(interestPaid),
     investments: roundMoney(investments),
     creditCardPayments: roundMoney(cardPayments),
+    borrowed: roundMoney(borrowed),
+    lentOrRepaid: roundMoney(lentOrRepaid),
     savings: roundMoney(savings),
     savingsRatePct: percentOf(savings, income, 2),
     investmentRatePct: percentOf(investments, income, 2),

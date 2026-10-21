@@ -3,7 +3,7 @@
  * description. Conservative: anything unclear stays a plain EXPENSE / INCOME that
  * the user can change in review.
  */
-export type ImportedType = "EXPENSE" | "INCOME" | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "EMI" | "INVESTMENT" | "CARD_PAYMENT" | "TRANSFER";
+export type ImportedType = "EXPENSE" | "INCOME" | "REFUND" | "REVERSAL" | "INTEREST" | "FEE" | "ATM_WITHDRAWAL" | "EMI" | "INVESTMENT" | "CARD_PAYMENT" | "TRANSFER" | "BORROWING";
 
 export function classifyImported(direction: "DEBIT" | "CREDIT", accountKind: "bank" | "card" | "cash", description: string): ImportedType {
   const d = description.toUpperCase();
@@ -21,6 +21,8 @@ export function classifyImported(direction: "DEBIT" | "CREDIT", accountKind: "ba
     if (/REVERSAL|REVERSED|RVSL/.test(d)) return "REVERSAL";
     if (/REFUND|CASHBACK|CASH BACK/.test(d)) return "REFUND";
     if (/\bINT(EREST)?\.?\s?(PD|PAID|CR|CREDIT|ON)\b|SB INT|INTEREST/.test(d)) return "INTEREST";
+    // A loan being paid out to you is borrowed money, not income.
+    if (/LOAN\s*(A\/?C\s*)?DISB|DISBURS|\bPL\s+DISB|LOAN\s+CREDIT(?!\s*CARD)/.test(d)) return "BORROWING";
     return "INCOME";
   }
   if (/\bATM\b|CASH WDL|CASH WITHDRAWAL|\bNWD\b|\bAWB\b/.test(d)) return "ATM_WITHDRAWAL";

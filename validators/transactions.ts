@@ -66,7 +66,7 @@ export const transactionFilterSchema = z.object({
   merchant: z.string().trim().max(100).optional(),
   min: moneySchema.optional(),
   max: moneySchema.optional(),
-  type: z.enum(["INCOME", "EXPENSE", "TRANSFER", "CARD_PAYMENT", "EMI", "INVESTMENT", "REFUND", "REVERSAL", "INTEREST", "FEE", "ATM_WITHDRAWAL", "OTHER"]).optional(),
+  type: z.enum(["INCOME", "EXPENSE", "TRANSFER", "CARD_PAYMENT", "EMI", "INVESTMENT", "REFUND", "REVERSAL", "INTEREST", "FEE", "ATM_WITHDRAWAL", "BORROWING", "OTHER"]).optional(),
   direction: z.enum(["DEBIT", "CREDIT"]).optional(),
   source: z.enum(["MANUAL", "GMAIL", "OUTLOOK", "CSV", "XLSX", "PDF", "FUTURE_ANDROID_SMS", "GROWW", "SYSTEM"]).optional(),
   duplicate: z.enum(["NOT_CHECKED", "UNIQUE", "POSSIBLE_DUPLICATE", "DUPLICATE", "MERGED"]).optional(),
