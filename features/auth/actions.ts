@@ -6,7 +6,7 @@ import { signIn, signOut } from "@/auth";
 import { runAction, zodFieldErrors } from "@/lib/api";
 import type { ActionResult } from "@/lib/errors";
 import { getRequestMeta } from "@/lib/security/request";
-import { isGoogleAuthEnabled } from "@/lib/env";
+import { isGoogleAuthEnabled, isMicrosoftAuthEnabled } from "@/lib/env";
 import { loginSchema } from "@/validators/auth";
 import {
   registerUser,
@@ -63,6 +63,11 @@ export async function resetPasswordAction(input: unknown): Promise<ActionResult>
 export async function googleSignInAction(formData: FormData) {
   if (!isGoogleAuthEnabled()) redirect("/login?error=GoogleNotConfigured");
   await signIn("google", { redirectTo: safeCallbackUrl(formData.get("callbackUrl")?.toString()) });
+}
+
+export async function microsoftSignInAction(formData: FormData) {
+  if (!isMicrosoftAuthEnabled()) redirect("/login?error=MicrosoftNotConfigured");
+  await signIn("microsoft-entra-id", { redirectTo: safeCallbackUrl(formData.get("callbackUrl")?.toString()) });
 }
 
 export async function logoutAction() {

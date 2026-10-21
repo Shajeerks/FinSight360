@@ -80,4 +80,6 @@ export const limiters = {
   emailSync: (globalLimiters.__fsLimiters.emailSync ??= createRateLimiter({ limit: 6, windowMs: 5 * 60_000 })),
   /** Statement uploads per user (also caps PDF password guessing). */
   upload: (globalLimiters.__fsLimiters.upload ??= createRateLimiter({ limit: 30, windowMs: 60 * 60_000 })),
+  /** Full data exports per user. */
+  dataExport: (globalLimiters.__fsLimiters.dataExport ??= createRateLimiter({ limit: 10, windowMs: 60 * 60_000 })),
 };

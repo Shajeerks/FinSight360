@@ -1,11 +1,15 @@
 import NextAuth, { type NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
+import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
+import { cookies } from "next/headers";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import authConfig from "@/auth.config";
 import { prisma } from "@/lib/db";
 import { audit, AuditAction } from "@/lib/audit";
-import { isGoogleAuthEnabled } from "@/lib/env";
+import { isGoogleAuthEnabled, isMicrosoftAuthEnabled } from "@/lib/env";
+import { LINK_COOKIE, verifyLinkToken } from "@/lib/auth/link-token";
+import { oauthSignInDecision, PROVIDER_LABEL, isOAuthProvider } from "@/services/auth-methods.service";
 import {
   authenticateWithPassword,
   getSessionState,
@@ -51,8 +55,37 @@ if (isGoogleAuthEnabled()) {
     }),
   );
 }
-// Extension point: Microsoft Entra ID (Outlook) can be added here later via
-// `next-auth/providers/microsoft-entra-id` using MICROSOFT_CLIENT_ID/SECRET.
+if (isMicrosoftAuthEnabled()) {
+  const tenant = process.env.MICROSOFT_TENANT_ID || "common";
+  providers.push(
+    MicrosoftEntraID({
+      clientId: process.env.MICROSOFT_CLIENT_ID,
+      clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
+      issuer: `https://login.microsoftonline.com/${tenant}/v2.0`,
+      // Identity only — no Microsoft Graph access (no profile-photo download).
+      authorization: { params: { scope: "openid profile email", prompt: "select_account" } },
+      // Microsoft emails aren't always verified, so never link to an existing
+      // account by email; linking happens from Settings while signed in.
+      allowDangerousEmailAccountLinking: false,
+      profile(p) {
+        const email = (p.email ?? p.preferred_username ?? "").toString().toLowerCase();
+        return { id: p.sub, name: p.name ?? email, email: email.includes("@") ? email : null, image: null };
+      },
+    }),
+  );
+}
+
+/** Reads (and consumes) the "add sign-in method" token set from Settings. */
+async function linkingUserFor(provider: string): Promise<string | null> {
+  try {
+    const jar = await cookies();
+    const userId = verifyLinkToken(jar.get(LINK_COOKIE)?.value, provider);
+    if (userId) jar.delete(LINK_COOKIE);
+    return userId;
+  } catch {
+    return null;
+  }
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
@@ -64,6 +97,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (account?.provider === "credentials") return true;
       // Only trust OAuth identities whose email the provider has verified.
       if (account?.provider === "google" && profile?.email_verified !== true) return false;
+      if (account && isOAuthProvider(account.provider)) {
+        const decision = await oauthSignInDecision({
+          provider: account.provider,
+          providerAccountId: account.providerAccountId,
+          email: (user?.email ?? (profile?.email as string | undefined) ?? null) || null,
+          linkingUserId: await linkingUserFor(account.provider),
+        });
+        if (decision !== true) return `/login?error=${decision}&provider=${encodeURIComponent(PROVIDER_LABEL[account.provider])}`;
+      }
       if (user?.id) {
         const state = await getSessionState(user.id);
         if (state && state.status !== "ACTIVE") return false;
@@ -121,6 +163,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async signOut(message) {
       const userId = "token" in message ? message.token?.sub : undefined;
       await audit({ userId: userId ?? null, action: AuditAction.LOGOUT, entityType: "User", entityId: userId ?? undefined });
+    },
+    async linkAccount({ user, account }) {
+      if (!user.id || !isOAuthProvider(account.provider)) return;
+      // createUser already audits brand-new OAuth sign-ups; this records added methods.
+      const fresh = await prisma.user.findUnique({ where: { id: user.id }, select: { createdAt: true } });
+      if (fresh && Date.now() - fresh.createdAt.getTime() < 60_000) return;
+      await audit({ userId: user.id, action: AuditAction.ACCOUNT_LINKED, entityType: "User", entityId: user.id, metadata: { provider: account.provider } });
+      try {
+        const { notify } = await import("@/services/notification.service");
+        await notify(user.id, { type: "SECURITY", title: `${PROVIDER_LABEL[account.provider]} sign-in added`, body: `You can now sign in to FinSight360 with ${PROVIDER_LABEL[account.provider]}. If this wasn't you, remove it in Settings → Authentication Methods and change your password.`, link: "/settings/authentication" });
+      } catch {
+        /* best effort */
+      }
     },
     async createUser({ user }) {
       // OAuth sign-up: create profile & default settings.

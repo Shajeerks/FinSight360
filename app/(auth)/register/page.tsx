@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { RegisterForm } from "@/features/auth/register-form";
-import { GoogleSignInButton, OrDivider } from "@/features/auth/google-button";
+import { GoogleSignInButton, MicrosoftSignInButton, OrDivider } from "@/features/auth/google-button";
 import { Alert } from "@/components/ui/alert";
-import { isGoogleAuthEnabled } from "@/lib/env";
+import { isGoogleAuthEnabled, isMicrosoftAuthEnabled, isRegistrationAllowed } from "@/lib/env";
 
 export const metadata: Metadata = { title: "Create account" };
 
 export default function RegisterPage() {
-  const allowed = process.env.ALLOW_REGISTRATION !== "false";
+  const allowed = isRegistrationAllowed();
   return (
     <div className="grid gap-6">
       <div className="space-y-1.5">
@@ -17,9 +17,12 @@ export default function RegisterPage() {
       </div>
       {allowed ? (
         <>
-          {isGoogleAuthEnabled() && (
+          {(isGoogleAuthEnabled() || isMicrosoftAuthEnabled()) && (
             <>
-              <GoogleSignInButton label="Sign up with Google" />
+              <div className="grid gap-2">
+                {isGoogleAuthEnabled() && <GoogleSignInButton label="Sign up with Google" />}
+                {isMicrosoftAuthEnabled() && <MicrosoftSignInButton label="Sign up with Microsoft" />}
+              </div>
               <OrDivider />
             </>
           )}

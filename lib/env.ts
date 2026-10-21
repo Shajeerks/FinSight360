@@ -61,6 +61,15 @@ export function productionIssues(e: Record<string, string | undefined> = process
   return { errors, warnings };
 }
 
+/** Microsoft sign-in uses the same Azure app registration as Outlook import. */
+export function isMicrosoftAuthEnabled(): boolean {
+  return Boolean(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) && process.env.MICROSOFT_SIGNIN !== "false";
+}
+
+export function isRegistrationAllowed(): boolean {
+  return process.env.ALLOW_REGISTRATION !== "false";
+}
+
 export function isGoogleAuthEnabled(): boolean {
   return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 }

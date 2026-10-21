@@ -22,7 +22,7 @@ export default async function NotificationsPage() {
       ) : (
         <NotificationList items={items.map((n) => ({ id: n.id, title: n.title, body: n.body, link: n.link, createdAt: n.createdAt.toISOString(), read: Boolean(n.readAt), type: n.type }))} />
       )}
-      <Card>
+      <Card id="settings" className="scroll-mt-20">
         <CardHeader>
           <CardTitle>Notification settings</CardTitle>
           <CardDescription>Choose what you hear about and where. Email is off until you switch it on.</CardDescription>

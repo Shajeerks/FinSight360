@@ -238,7 +238,7 @@ Without these settings the Email Sync page still works for testing: paste an ale
 | `SESSION_MAX_AGE_HOURS` | – | Session lifetime (default 168) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | – | Google sign-in |
 | `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` | Phase 5 | Gmail import |
-| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT_ID` | Phase 5 | Outlook import |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT_ID` | – | Outlook import **and** "Sign in with Microsoft" (add the redirect URI `<APP_URL>/api/auth/callback/microsoft-entra-id` to the same Azure app; set `MICROSOFT_SIGNIN="false"` to keep only Outlook import) |
 | `EMAIL_TRANSPORT`, `EMAIL_FROM` | – | Email delivery: `console` (prints to the terminal) or `smtp` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD` | with `smtp` | SMTP server for password-reset and notification emails (Gmail app password, Zoho, SES, Brevo…) |
 | `REQUIRE_EMAIL_VERIFICATION` | – | Block sign-in until the email is verified |

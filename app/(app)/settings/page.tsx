@@ -14,19 +14,19 @@ type Item = { href?: string; title: string; description: string; icon: LucideIco
 
 const ITEMS: Item[] = [
   { href: "/settings/profile", title: "Profile", description: "Name, phone, timezone and currency", icon: User },
-  { href: "/settings/security", title: "Security & Sign-in", description: "Password, Google sign-in, sessions", icon: ShieldCheck },
+  { href: "/settings/security", title: "Security & Sign-in", description: "Password, verification, sessions", icon: ShieldCheck },
+  { href: "/settings/authentication", title: "Authentication Methods", description: "Password, Google and Microsoft sign-in", icon: KeyRound },
   { href: "/settings/audit-log", title: "Audit Log", description: "Sign-ins and important account activity", icon: FileClock },
   { href: "/accounts", title: "Bank Accounts & Wallets", description: "Accounts, cash wallets and balances", icon: Link2 },
-  { title: "Connected Accounts", description: "Groww and other providers", icon: Link2, phase: 6 },
-  { title: "Email Connections", description: "Gmail and Outlook imports", icon: Mail, phase: 5 },
-  { title: "Notification Preferences", description: "In-app, browser and email alerts", icon: Bell, phase: 8 },
-  { title: "Currency", description: "INR today — multi-currency ready", icon: Coins, phase: 7 },
+  { href: "/settings/connected-accounts", title: "Connected Accounts", description: "Groww and mailbox connections", icon: Link2 },
+  { href: "/imports/email", title: "Email Connections", description: "Gmail and Outlook imports", icon: Mail },
+  { href: "/notifications#settings", title: "Notification Preferences", description: "In-app, browser and email alerts", icon: Bell },
+  { href: "/settings/app#regional", title: "Currency", description: "₹ Indian Rupee (INR) and timezone", icon: Coins },
   { href: "/settings/categories", title: "Categories", description: "Your own categories and sub-categories", icon: Shapes },
   { href: "/settings/rules", title: "Transaction Rules", description: "Automatic categorization rules", icon: Wand2 },
-  { title: "Import Templates", description: "Saved column mappings per bank", icon: FolderInput, phase: 4 },
-  { title: "Data Export", description: "Download all of your data", icon: Database, phase: 9 },
-  { title: "Application Settings", description: "Defaults and preferences", icon: SlidersHorizontal, phase: 9 },
-  { title: "Authentication Methods", description: "Add Microsoft sign-in", icon: KeyRound, phase: 5 },
+  { href: "/settings/import-templates", title: "Import Templates", description: "Saved column mappings per bank", icon: FolderInput },
+  { href: "/settings/data-export", title: "Data Export", description: "Download all of your data", icon: Database },
+  { href: "/settings/app", title: "Application Settings", description: "Defaults, appearance and installation status", icon: SlidersHorizontal },
 ];
 
 export default function SettingsPage() {

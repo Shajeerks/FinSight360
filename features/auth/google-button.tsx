@@ -1,4 +1,4 @@
-import { googleSignInAction } from "@/features/auth/actions";
+import { googleSignInAction, microsoftSignInAction } from "@/features/auth/actions";
 import { Button } from "@/components/ui/button";
 
 function GoogleIcon() {
@@ -18,6 +18,29 @@ export function GoogleSignInButton({ callbackUrl, label = "Continue with Google"
       <input type="hidden" name="callbackUrl" value={callbackUrl ?? "/dashboard"} />
       <Button type="submit" variant="outline" className="w-full">
         <GoogleIcon />
+        {label}
+      </Button>
+    </form>
+  );
+}
+
+function MicrosoftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="size-4">
+      <path fill="#F25022" d="M1 1h10.5v10.5H1z" />
+      <path fill="#7FBA00" d="M12.5 1H23v10.5H12.5z" />
+      <path fill="#00A4EF" d="M1 12.5h10.5V23H1z" />
+      <path fill="#FFB900" d="M12.5 12.5H23V23H12.5z" />
+    </svg>
+  );
+}
+
+export function MicrosoftSignInButton({ callbackUrl, label = "Continue with Microsoft" }: { callbackUrl?: string; label?: string }) {
+  return (
+    <form action={microsoftSignInAction}>
+      <input type="hidden" name="callbackUrl" value={callbackUrl ?? "/dashboard"} />
+      <Button type="submit" variant="outline" className="w-full">
+        <MicrosoftIcon />
         {label}
       </Button>
     </form>
