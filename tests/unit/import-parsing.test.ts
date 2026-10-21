@@ -126,3 +126,41 @@ describe("file readers", () => {
     expect(rows[1]).toEqual(["2026-10-05", "UBER", "0.3"]);
   });
 });
+
+describe("PDF statements with a serial-number column (e.g. Kotak 811)", () => {
+  it("skips the leading # column and still reads every row, verified by the running balance", async () => {
+    const { parseStatementLines } = await import("@/lib/import/pdf-statement");
+    const lines = [
+      "#   Date          Description                         Chq/Ref No.         Withdrawal (Dr)   Deposit (Cr)   Balance",
+      "    Opening Balance                                                                                         25,000.00",
+      "1   01-10-2026    UPI/SWIGGY/427351123456/Food order  UPI-427351123456    349.00                           24,651.00",
+      "2   02-10-2026    NEFT CR ACME TECHNOLOGIES SALARY    NEFTN2026100212     0.00              85,000.00      1,09,651.00",
+      "3   03 Oct 2026   ATM WDL MG ROAD BANGALORE           ATM-0099            2,000.00                         1,07,651.00",
+      "10. 04/10/2026    UPI/BIGBASKET/427351987654          UPI-427351987654    1,234.50                         1,06,416.50",
+    ];
+    const { rows, verifiedShare } = parseStatementLines(lines, { accountKind: "bank" });
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => [r.transactionDate.toISOString().slice(0, 10), r.amount, r.direction])).toEqual([
+      ["2026-10-01", "349.00", "DEBIT"],
+      ["2026-10-02", "85000.00", "CREDIT"],
+      ["2026-10-03", "2000.00", "DEBIT"],
+      ["2026-10-04", "1234.50", "DEBIT"],
+    ]);
+    expect(rows[0].description).toContain("SWIGGY");
+    expect(rows[0].description.startsWith("1 ")).toBe(false);
+    expect(verifiedShare).toBe(1);
+  });
+
+  it("leaves ordinary statements and non-row lines alone", async () => {
+    const { parseStatementLines } = await import("@/lib/import/pdf-statement");
+    const { rows } = parseStatementLines([
+      "Opening balance 10,000.00",
+      "12 Oct 2026 UPI/ZOMATO/123 250.00 9,750.00",
+      "Page 1 of 3",
+      "2026 Customer care 1800 123 4567",
+      "15 items 12.00",
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].transactionDate.toISOString().slice(0, 10)).toBe("2026-10-12");
+  });
+});

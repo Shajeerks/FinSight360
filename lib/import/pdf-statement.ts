@@ -25,6 +25,8 @@ export type PdfRow = {
 
 const DATE_AT_START = /^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}|\d{4}-\d{2}-\d{2})\b/;
 const AMOUNT = /(?:^|\s)(\(?-?(?:₹\s?)?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}\)?(?:\s?(?:Cr|Dr|CR|DR)\.?)?)(?=\s|$)/g;
+/** A serial-number column before the date ("1  01-10-2026 …", "12. 01 Oct 2026 …"), e.g. Kotak 811. */
+const SERIAL_BEFORE_DATE = /^\s*\d{1,5}[.)]?\s+(?=\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}\b|\d{4}-\d{2}-\d{2}\b)/;
 const SKIP = /(opening balance|closing balance|balance b\/?f|brought forward|carried forward|statement of account|page \d+ of \d+|^\s*page\s+\d+|total|grand total)/i;
 
 function parseAnyDate(token: string): Date | null {
@@ -58,7 +60,13 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
   let current: PdfRow | null = null;
 
   for (const rawLine of lines) {
-    const line = rawLine.replace(/ /g, " ");
+    let line = rawLine.replace(/ /g, " ");
+    // Skip a leading serial-number column so the row still starts with its date.
+    const startsWithDate = DATE_AT_START.exec(line);
+    if (!startsWithDate || !parseAnyDate(startsWithDate[1])) {
+      const serial = SERIAL_BEFORE_DATE.exec(line);
+      if (serial) line = line.slice(serial[0].length);
+    }
     if (/opening balance|balance b\/?f|brought forward/i.test(line)) {
       const amts = trailingAmounts(line);
       const last = amts.length ? parseAmount(amts[amts.length - 1].text) : null;

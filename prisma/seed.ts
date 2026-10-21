@@ -442,9 +442,22 @@ async function seedDemoUser() {
   console.log(`  ${recurring.length} recurring commitments, ${hs.length} holdings, ${reminders.length + 1} reminders`);
 }
 
+/**
+ * Accounts created before the system categories existed (e.g. a fresh hosted
+ * database) never got their starter categorization rules. Give every account
+ * without rules the defaults. Safe on every deploy: accounts that already have
+ * rules — including ones the user edited — are left alone.
+ */
+async function seedRulesForExistingUsers() {
+  const users = await prisma.user.findMany({ where: { deletedAt: null, categorizationRules: { none: {} } }, select: { id: true } });
+  for (const u of users) await prisma.$transaction((tx) => seedDefaultsForUser(tx, u.id));
+  console.log(`✓ Starter categorization rules added for ${users.length} existing account(s) without rules`);
+}
+
 async function main() {
   await seedSystemCategories();
   await seedSystemSettings();
+  await seedRulesForExistingUsers();
 
   const isProd = process.env.NODE_ENV === "production";
   if (isProd || process.env.SEED_DEMO_DATA === "false") {
