@@ -164,3 +164,55 @@ describe("PDF statements with a serial-number column (e.g. Kotak 811)", () => {
     expect(rows[0].transactionDate.toISOString().slice(0, 10)).toBe("2026-10-12");
   });
 });
+
+describe("PDF statements: overdraft balances printed without a minus sign", () => {
+  it("follows the running balance below zero and back", async () => {
+    const { parseStatementLines } = await import("@/lib/import/pdf-statement");
+    const { rows, verifiedShare } = parseStatementLines([
+      "Opening Balance 8,779.17",
+      "1 06 May 2026 811:BBPS/2600/RBL BANK CREDIT CARD 811BP-2600 13,000.00 4,220.83",
+      "2 06 May 2026 UPI/LOAN/Collect request UPI-11 9,594.00 13,814.83",
+      "3 06 May 2026 CASHBACK EARNED ONBF- 9.56 13,805.27",
+      "4 06 May 2026 Sweep Trf From: 3818302855 35,000.00 21,194.73",
+    ]);
+    expect(rows.map((r) => [r.direction, r.balance])).toEqual([
+      ["DEBIT", "-4220.83"],
+      ["DEBIT", "-13814.83"],
+      ["CREDIT", "-13805.27"],
+      ["CREDIT", "21194.73"],
+    ]);
+    expect(verifiedShare).toBe(1);
+  });
+
+  it("doesn't read 'CREDIT CARD' as money coming in when it has to guess", async () => {
+    const { parseStatementLines } = await import("@/lib/import/pdf-statement");
+    const { rows } = parseStatementLines(["06 May 2026 BILLPAY ICICI CREDIT CARD 5,000.00"]);
+    expect(rows[0].direction).toBe("DEBIT");
+  });
+});
+
+describe("PDF statements with a separate Cr/Dr column (e.g. Federal Bank)", () => {
+  it("reads capital-month dates and balances followed by a spaced Cr/Dr marker", async () => {
+    const { parseStatementLines } = await import("@/lib/import/pdf-statement");
+    const { rows, openingBalance, verifiedShare } = parseStatementLines([
+      "Tran Cheque DR",
+      "Date   Value Date   Particulars   Tran ID   Withdrawals   Deposits   Balance",
+      "Opening Balance   205.84   Cr",
+      "01-APR-2026   01-APR-2026 UPIOUT/600000000001   TFR   C40000001   100.00   105.84   Cr",
+      "/SHOP@ybl/Groceries /5412",
+      "03-APR-2026   03-APR-2026 UPI IN/050000000002/friend@axl   TFR   S60000002   500.00   605.84   Cr",
+      "05-APR-2026   05-APR-2026 ACHDR/LOAN EMI   TFR   S50000003   700.00   94.16   Dr",
+      "06-APR-2026   06-APR-2026 NEFT IN/SALARY   TFR   S50000004   1000.00   905.84   Cr",
+      "GRAND TOTAL   800.00 1500.00",
+    ]);
+    expect(openingBalance).toBe("205.84");
+    expect(rows.map((r) => [r.transactionDate.toISOString().slice(0, 10), r.amount, r.direction, r.balance])).toEqual([
+      ["2026-04-01", "100.00", "DEBIT", "105.84"],
+      ["2026-04-03", "500.00", "CREDIT", "605.84"],
+      ["2026-04-05", "700.00", "DEBIT", "-94.16"],
+      ["2026-04-06", "1000.00", "CREDIT", "905.84"],
+    ]);
+    expect(rows[0].description).toContain("SHOP@ybl");
+    expect(verifiedShare).toBe(1);
+  });
+});

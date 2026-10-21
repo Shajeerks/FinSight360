@@ -10,6 +10,8 @@ import { saveFile, sha256 } from "@/lib/storage";
 import { classifyImported, detectInstitution, extractReference } from "@/lib/import/classify";
 import { detectFileKind, extractPdfLines, MAX_UPLOAD_BYTES, parseCsv, parseXlsx, PdfPasswordError, type FileKind } from "@/lib/import/files";
 import { parseStatementLines } from "@/lib/import/pdf-statement";
+import { normalizeDescription } from "@/lib/transactions/normalize";
+import { countableWhere } from "@/lib/transactions/countable";
 import {
   detectDateFormat,
   findHeaderRow,
@@ -408,7 +410,9 @@ export async function analyzeImport(userId: string, importId: string) {
   for (const r of rows) {
     if (!r.transactionDate || !r.amount || !r.direction || !r.description) continue;
     const amount = r.amount.toFixed(2);
-    const occKey = `${r.transactionDate.toISOString()}|${amount}|${r.direction}|${r.description}`;
+    // Same normalisation as the fingerprint: two different rows that only differ by
+    // reference numbers (e.g. two ₹60 UPI payments to the same person) get 1 and 2.
+    const occKey = `${r.transactionDate.toISOString()}|${amount}|${r.direction}|${normalizeDescription(r.description)}`;
     const occurrence = (occurrences.get(occKey) ?? 0) + 1;
     occurrences.set(occKey, occurrence);
     const externalId = statementFingerprint(account, r.transactionDate, amount, r.direction, r.description, occurrence);
@@ -419,7 +423,9 @@ export async function analyzeImport(userId: string, importId: string) {
     if (type === "CARD_PAYMENT" && account.kind === "bank") {
       const card = await resolvePaidCard(prisma, userId, r.description);
       creditCardId = card?.id ?? null;
-      if (!card?.exact) confidence = Math.min(confidence, 70);
+      // Only a guessed card needs confirming. A card you don't track in FinSight360
+      // is still a certain bank payment — it shouldn't be held back from the balance.
+      if (card && !card.exact) confidence = Math.min(confidence, 70);
     }
     const merchantName = merchantFor(type, r.description);
     const row: IngestRow = { account, transactionDate: r.transactionDate, amount, direction: r.direction, transactionType: type, description: r.description, merchantName, referenceNumber: r.referenceNumber, creditCardId, categoryId: null, subCategoryId: null, confidence };
@@ -512,7 +518,7 @@ export async function cancelImport(userId: string, importId: string, meta: Reque
 
 // ───────────────────────────── commit ─────────────────────────────
 
-export type ImportSummary = { created: number; linked: number; possibleDuplicates: number; pendingReview: number; skipped: number; invalid: number };
+export type ImportSummary = { created: number; linked: number; possibleDuplicates: number; pendingReview: number; skipped: number; invalid: number; openingBalanceSet?: string };
 
 /**
  * Writes the reviewed rows to the ledger in ONE database transaction:
@@ -657,6 +663,22 @@ async function commitImportTx(userId: string, importId: string, meta: RequestMet
       if (r.balance) lastBalance = r.balance;
     }
 
+    // The statement's opening balance is the account balance just before its first
+    // row. When nothing in the account is older than this statement and the rows
+    // check out against the running balance, use it as the account's opening balance
+    // (undo restores the previous one).
+    let openingBalanceSet: string | null = null;
+    if (account.kind === "bank" && statement.openingBalance !== null && minDate && Number(imp.parseConfidence ?? 0) >= 90) {
+      const older = await tx.transaction.count({ where: countableWhere(userId, { bankAccountId: account.id, transactionDate: { lt: minDate } }) });
+      const acct = await tx.bankAccount.findUniqueOrThrow({ where: { id: account.id }, select: { openingBalance: true } });
+      if (older === 0 && !acct.openingBalance.equals(statement.openingBalance)) {
+        await tx.bankAccount.update({ where: { id: account.id }, data: { openingBalance: statement.openingBalance } });
+        await tx.transactionImport.update({ where: { id: importId }, data: { previousOpeningBalance: acct.openingBalance } });
+        openingBalanceSet = statement.openingBalance.toFixed(2);
+      }
+    }
+    if (openingBalanceSet !== null) summary.openingBalanceSet = openingBalanceSet;
+
     await recomputeAffected(tx, affected);
     await tx.statement.update({ where: { id: statement.id }, data: { periodStart: minDate, periodEnd: maxDate, statementDate: maxDate, closingBalance: lastBalance, status: "PROCESSED" } });
     await tx.transactionImport.update({
@@ -737,10 +759,14 @@ export async function undoImport(userId: string, importId: string, meta: Request
       collectAffected(affected, t);
       await retire(t.id);
     }
+    if (imp.previousOpeningBalance !== null && imp.bankAccountId) {
+      await tx.bankAccount.update({ where: { id: imp.bankAccountId }, data: { openingBalance: imp.previousOpeningBalance } });
+      collectAffected(affected, { bankAccountId: imp.bankAccountId });
+    }
     await lockForWrite(tx, affected);
     await recomputeAffected(tx, affected);
     await tx.statement.updateMany({ where: { importId }, data: { deletedAt: new Date() } });
-    await tx.transactionImport.update({ where: { id: importId }, data: { status: "CANCELLED" } });
+    await tx.transactionImport.update({ where: { id: importId }, data: { status: "CANCELLED", previousOpeningBalance: null } });
     await audit({ userId, action: AuditAction.IMPORT_UNDONE, entityType: "TransactionImport", entityId: importId, ip: meta.ip, userAgent: meta.userAgent, metadata: { removed, detached } }, tx);
     return { removed, detached };
   }, LONG_TX);

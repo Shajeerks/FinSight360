@@ -1027,6 +1027,8 @@ model TransactionImport {
   /// CSV/XLSX: detected header row (0-based) and the column mapping applied.
   headerRowIndex         Int?
   columnMapping          Json?
+  /// Account opening balance before this import set it from the statement (restored on undo).
+  previousOpeningBalance Decimal?     @db.Decimal(18, 2)
   dateFormat             String?
   amountMode             AmountMode?
   /// PDF: share of rows whose debit/credit was verified by the running balance.

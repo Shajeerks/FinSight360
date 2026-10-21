@@ -24,7 +24,7 @@ export type PdfRow = {
 };
 
 const DATE_AT_START = /^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}|\d{4}-\d{2}-\d{2})\b/;
-const AMOUNT = /(?:^|\s)(\(?-?(?:₹\s?)?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}\)?(?:\s?(?:Cr|Dr|CR|DR)\.?)?)(?=\s|$)/g;
+const AMOUNT = /(?:^|\s)(\(?-?(?:₹\s?)?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}\)?(?:\s*(?:Cr|Dr|CR|DR)\.?)?)(?=\s|$)/g;
 /** A serial-number column before the date ("1  01-10-2026 …", "12. 01 Oct 2026 …"), e.g. Kotak 811. */
 const SERIAL_BEFORE_DATE = /^\s*\d{1,5}[.)]?\s+(?=\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}\b|\d{4}-\d{2}-\d{2}\b)/;
 const SKIP = /(opening balance|closing balance|balance b\/?f|brought forward|carried forward|statement of account|page \d+ of \d+|^\s*page\s+\d+|total|grand total)/i;
@@ -145,21 +145,30 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
   let verified = 0;
   for (const r of rows) {
     if (r.balance !== null) {
-      const bal = toDecimal(r.balance);
+      let bal = toDecimal(r.balance);
       if (prev !== null) {
         const amt = toDecimal(r.amount);
-        if (prev.plus(amt).equals(bal)) {
-          if (r.direction === null || r.direction === "CREDIT") {
-            r.direction = "CREDIT";
+        const verify = (dir: "CREDIT" | "DEBIT") => {
+          if (r.direction === null || r.direction === dir) {
+            r.direction = dir;
             r.method = "BALANCE";
           }
-        } else if (prev.minus(amt).equals(bal)) {
-          if (r.direction === null || r.direction === "DEBIT") {
-            r.direction = "DEBIT";
-            r.method = "BALANCE";
-          }
+        };
+        if (prev.plus(amt).equals(bal)) verify("CREDIT");
+        else if (prev.minus(amt).equals(bal)) verify("DEBIT");
+        // Overdrawn balances printed without a minus sign (e.g. Kotak during a sweep):
+        // the running total only works if this balance is negative.
+        else if (!bal.isNegative() && !bal.isZero() && prev.minus(amt).equals(bal.negated())) {
+          verify("DEBIT");
+          bal = bal.negated();
+        } else if (!bal.isNegative() && !bal.isZero() && prev.plus(amt).equals(bal.negated())) {
+          verify("CREDIT");
+          bal = bal.negated();
         }
-        if (r.method === "BALANCE") verified++;
+        if (r.method === "BALANCE") {
+          verified++;
+          r.balance = bal.toFixed(2);
+        }
       }
       prev = bal;
     } else {
@@ -172,7 +181,7 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
         r.direction = "DEBIT";
         r.method = "CARD_DEFAULT";
       } else {
-        r.direction = /\b(SALARY|REFUND|REVERSAL|INTEREST|CREDIT|CR|DEPOSIT|RECEIVED|NEFT CR|IMPS CR|CASHBACK)\b/i.test(r.description) ? "CREDIT" : "DEBIT";
+        r.direction = /\b(SALARY|REFUND|REVERSAL|INTEREST|CREDIT(?!\s*CARD)|CR|DEPOSIT|RECEIVED|NEFT CR|IMPS CR|CASHBACK|SWEEP\s+TRF\s+FROM|SWEEP\s+TRANSFER\s+FROM)\b/i.test(r.description) ? "CREDIT" : "DEBIT";
         r.method = "GUESS";
       }
     }

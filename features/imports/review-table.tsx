@@ -137,7 +137,7 @@ export function ImportReviewTable({ importId, rows: initialRows, categories, edi
                     const res = await commitImportAction(importId);
                     if (!res.ok) return void toast.error(res.error);
                     const s = res.data!;
-                    toast.success(`Imported: ${s.created} new, ${s.linked} linked to existing${s.possibleDuplicates ? `, ${s.possibleDuplicates} to review as duplicates` : ""}${s.pendingReview ? `, ${s.pendingReview} waiting for approval` : ""}.`);
+                    toast.success(`Imported: ${s.created} new, ${s.linked} linked to existing${s.possibleDuplicates ? `, ${s.possibleDuplicates} to review as duplicates` : ""}${s.pendingReview ? `, ${s.pendingReview} waiting for approval` : ""}.${s.openingBalanceSet ? ` Opening balance set to ₹${Number(s.openingBalanceSet).toLocaleString("en-IN", { minimumFractionDigits: 2 })} from the statement.` : ""}`);
                     router.refresh();
                   })
                 }
