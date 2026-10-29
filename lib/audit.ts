@@ -60,6 +60,10 @@ export const AuditAction = {
   INVESTMENT_IMPORTED: "investment.imported",
   INVESTMENT_PRICES_UPDATED: "investment.prices_updated",
   REVIEW_RESOLVED: "review.resolved",
+  DEBT_ENTRY_SAVED: "debt.entry_saved",
+  DEBT_LENDER_SAVED: "debt.lender_saved",
+  DEBT_LENDER_DELETED: "debt.lender_deleted",
+  DEBT_EXCEL_IMPORTED: "debt.excel_imported",
 } as const;
 
 export type AuditActionValue = (typeof AuditAction)[keyof typeof AuditAction] | (string & {});

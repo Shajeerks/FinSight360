@@ -15,6 +15,7 @@ import {
   BarChart3,
   FileText,
   Settings,
+  Scale,
   type LucideIcon,
 } from "lucide-react";
 
@@ -43,6 +44,7 @@ export const NAV_SECTIONS: NavSection[] = [
     title: "Loans & Wealth",
     items: [
       { href: "/loans", label: "Loans & EMI", icon: HandCoins },
+      { href: "/debt-tracker", label: "Debt Tracker", icon: Scale },
       { href: "/investments", label: "Investments", icon: TrendingUp },
     ],
   },

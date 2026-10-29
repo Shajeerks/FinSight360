@@ -42,6 +42,10 @@ const LABELS: Record<string, string> = {
   "import.undone": "Import undone",
   "duplicate.resolved": "Duplicate reviewed",
   "review.resolved": "Imported transaction reviewed",
+  "debt.entry_saved": "Debt tracker figures saved",
+  "debt.lender_saved": "Lender saved in the debt tracker",
+  "debt.lender_deleted": "Lender removed from the debt tracker",
+  "debt.excel_imported": "Debt history imported from Excel",
 };
 
 export function describeAuditAction(action: string): string {

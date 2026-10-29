@@ -432,6 +432,8 @@ model User {
   statements              Statement[]
   attachments             Attachment[]
   auditLogs               AuditLog[]
+  debtLenders             DebtLender[]
+  debtMonthEntries        DebtMonthEntry[]
 
   @@map("users")
 }
@@ -720,6 +722,10 @@ model LoanPayment {
   /// Paid before the loan was tracked in FinSight360 (entered as "EMIs already paid" /
   /// "outstanding as per bank"). Never linked to a ledger transaction.
   isOpening          Boolean         @default(false)
+  /// The payment was matched to a transaction that already existed (e.g. an EMI
+  /// debit from an uploaded bank statement). Undoing the payment only unlinks
+  /// that transaction; it is never deleted.
+  linkedExisting     Boolean         @default(false)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   deletedAt          DateTime?
@@ -1627,4 +1633,73 @@ model SystemSetting {
   updatedAt   DateTime @updatedAt
 
   @@map("system_settings")
+}
+
+// ───────────────────────────── Debt tracker ─────────────────────────────
+
+enum DebtLenderKind {
+  PERSON
+  OTHER
+}
+
+enum DebtEntrySource {
+  MANUAL
+  EXCEL
+}
+
+/// A lender that isn't a credit card or a bank loan set up in FinSight360:
+/// a friend/relative, a chit fund, a gold loan you don't track in Loans, etc.
+model DebtLender {
+  id                 String         @id @default(cuid())
+  userId             String
+  name               String
+  kind               DebtLenderKind @default(PERSON)
+  /// Text to find this lender's money in transactions marked "Loan / borrowing"
+  /// (defaults to the name). Borrowed credits add to the balance, repayments reduce it.
+  matchText          String?
+  /// What you owed when you started tracking (before the first linked transaction).
+  openingOutstanding Decimal        @default(0) @db.Decimal(18, 2)
+  openingDate        DateTime?      @db.Date
+  /// Interest per month in percent (e.g. 1.5 = 1.5% a month). 0 = interest-free.
+  monthlyRatePct     Decimal        @default(0) @db.Decimal(7, 4)
+  notes              String?
+  closedAt           DateTime?      @db.Date
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  deletedAt          DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("debt_lenders")
+}
+
+/// Figures you entered (or imported from Excel) for one lender in one month.
+/// Every amount is optional: an empty one is calculated from your statements,
+/// transactions and loan schedules. Nothing here changes the ledger.
+model DebtMonthEntry {
+  id                 String          @id @default(cuid())
+  userId             String
+  /// First day of the calendar month.
+  month              DateTime        @db.Date
+  /// "card:<id>" | "loan:<id>" | "lender:<id>"
+  lenderKey          String          @db.VarChar(80)
+  lenderName         String
+  openingOutstanding Decimal?        @db.Decimal(18, 2)
+  newBorrowing       Decimal?        @db.Decimal(18, 2)
+  payment            Decimal?        @db.Decimal(18, 2)
+  paidToDate         Decimal?        @db.Decimal(18, 2)
+  interest           Decimal?        @db.Decimal(18, 2)
+  closingOutstanding Decimal?        @db.Decimal(18, 2)
+  remainingEmis      Int?
+  source             DebtEntrySource @default(MANUAL)
+  notes              String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, month, lenderKey])
+  @@index([userId, lenderKey])
+  @@map("debt_month_entries")
 }

@@ -31,7 +31,7 @@ export function DeleteLoanPaymentButton({ loanId, paymentId }: { loanId: string;
       className="size-8 text-muted-foreground hover:text-destructive"
       aria-label="Undo payment"
       title="Undo this payment?"
-      description="It's removed from the loan and from your transactions; the remaining schedule is re-calculated."
+      description="It’s removed from the loan and the remaining schedule is re-calculated. A payment you added here is also removed from your transactions; an EMI from an uploaded bank statement stays there, just no longer linked."
       confirmLabel="Undo payment"
       onConfirm={() => deleteLoanPaymentAction(loanId, paymentId)}
     >

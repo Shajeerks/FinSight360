@@ -330,11 +330,19 @@ export async function deleteLoan(userId: string, id: string, meta: RequestMeta =
  *  • CHARGE — penalty/late fee; doesn't change principal.
  * Optionally writes the matching ledger transaction (EMI / Fee) from a bank or cash account.
  */
-export async function recordLoanPayment(userId: string, loanId: string, input: unknown, meta: RequestMeta = NO_META) {
+export async function recordLoanPayment(userId: string, loanId: string, input: unknown, meta: RequestMeta = NO_META, opts: { linkTransactionId?: string } = {}) {
   const d = parseOrThrow(loanPaymentSchema, input);
   return prisma.$transaction(async (tx) => {
     await lockLoan(tx, loanId);
     let loan = await ownedLoan(tx, userId, loanId);
+    // Paying with a transaction that's already in the ledger (e.g. an EMI debit from an
+    // uploaded bank statement): its date and amount are used and nothing new is created.
+    const linked = opts.linkTransactionId ? await linkableTransaction(tx, userId, loanId, opts.linkTransactionId) : null;
+    if (linked) {
+      d.paymentDate = linked.transactionDate;
+      d.amount = linked.amount.toFixed(2);
+      d.recordInLedger = false;
+    }
     if (d.paymentType !== "CHARGE" && loan.status !== "ACTIVE") throw new AppError("This loan is already closed.", 409, "LOAN_CLOSED");
     const amount = roundMoney(d.amount);
     const outstanding = loan.outstandingPrincipal;
@@ -412,7 +420,19 @@ export async function recordLoanPayment(userId: string, loanId: string, input: u
       transactionId = t.id;
     }
 
-    const base = { loanId, paymentDate: d.paymentDate, paymentType: d.paymentType, notes: d.notes };
+    if (linked) {
+      transactionId = linked.id;
+      const cat = await emiCategory(tx, loan.loanType, d.paymentType === "CHARGE");
+      await tx.transaction.update({
+        where: { id: linked.id },
+        data: { loanId, transactionType: d.paymentType === "CHARGE" ? "FEE" : "EMI", categoryId: cat.categoryId ?? linked.categoryId, subCategoryId: cat.categoryId ? cat.subCategoryId : linked.subCategoryId },
+      });
+      // A loan payment is not an expense (charges are).
+      await tx.income.deleteMany({ where: { transactionId: linked.id } });
+      if (d.paymentType !== "CHARGE") await tx.expense.deleteMany({ where: { transactionId: linked.id } });
+    }
+
+    const base = { loanId, paymentDate: d.paymentDate, paymentType: d.paymentType, notes: d.notes, linkedExisting: Boolean(linked) };
     let payment;
     if (parts.length > 1) {
       payment = await tx.loanPayment.create({
@@ -457,6 +477,23 @@ export async function recordLoanPayment(userId: string, loanId: string, input: u
   });
 }
 
+/** A debit already in the ledger that can become a payment on this loan. */
+async function linkableTransaction(tx: Tx, userId: string, loanId: string, transactionId: string) {
+  const t = await tx.transaction.findFirst({
+    where: { id: transactionId, userId, deletedAt: null, status: "CONFIRMED", duplicateOfId: null },
+    include: { loanPayment: { select: { id: true, deletedAt: true } } },
+  });
+  if (!t) throw new NotFoundError("Transaction not found.");
+  if (t.loanPayment && !t.loanPayment.deletedAt) throw new AppError("This transaction is already recorded as a loan payment.", 409, "ALREADY_LINKED");
+  if (t.loanId && t.loanId !== loanId) throw new AppError("This transaction belongs to another loan.", 409, "OTHER_LOAN");
+  if (t.direction !== "DEBIT" || (!t.bankAccountId && !t.cashAccountId)) throw new AppError("Only money paid out of a bank or cash account can be a loan payment.", 400, "NOT_A_PAYMENT");
+  if (t.transferGroupId || !["EMI", "EXPENSE", "OTHER", "TRANSFER", "FEE"].includes(t.transactionType)) {
+    throw new AppError("This transaction can't be a loan payment (it's a transfer between your own accounts or a card payment).", 400, "NOT_A_PAYMENT");
+  }
+  if (t.loanPayment) await tx.loanPayment.update({ where: { id: t.loanPayment.id }, data: { transactionId: null } });
+  return t;
+}
+
 /** Undo a recorded payment (and its ledger entry); the schedule is re-projected. */
 export async function deleteLoanPayment(userId: string, loanId: string, paymentId: string, meta: RequestMeta = NO_META) {
   await prisma.$transaction(async (tx) => {
@@ -468,7 +505,10 @@ export async function deleteLoanPayment(userId: string, loanId: string, paymentI
     const group = p.groupId ? await tx.loanPayment.findMany({ where: { groupId: p.groupId, loanId, deletedAt: null } }) : [p];
     for (const part of group) {
       await tx.loanPayment.update({ where: { id: part.id }, data: { deletedAt: new Date(), transactionId: null } });
-      if (part.transactionId) await deleteTransactionWithin(tx, userId, part.transactionId, meta, { fromLoan: true });
+      if (part.transactionId && part.linkedExisting) {
+        // It came from a statement: keep it, just detach it from the loan.
+        await tx.transaction.update({ where: { id: part.transactionId }, data: { loanId: null } });
+      } else if (part.transactionId) await deleteTransactionWithin(tx, userId, part.transactionId, meta, { fromLoan: true });
     }
     for (const part of group) {
       if (!part.scheduleId) continue;

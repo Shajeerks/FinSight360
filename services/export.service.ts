@@ -52,7 +52,7 @@ export async function buildFullExport(userId: string): Promise<FullExport> {
   const loans = { loan: { userId } };
   const [
     user, profile, banks, cash, cards, txns, sources, categories, subCategories, rules, budgets, recurring, reminders,
-    loanRows, schedule, loanPayments, invAccounts, holdings, invTxns, netWorth, imports, statements, notifications, audit,
+    loanRows, schedule, loanPayments, invAccounts, holdings, invTxns, netWorth, imports, statements, notifications, audit, debtLenders, debtEntries,
   ] = await Promise.all([
     prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { id: true, email: true, name: true, emailVerified: true, createdAt: true, lastLoginAt: true } }),
     prisma.userProfile.findMany({ where: { userId } }),
@@ -82,6 +82,8 @@ export async function buildFullExport(userId: string): Promise<FullExport> {
     prisma.statement.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, select: { id: true, type: true, periodStart: true, periodEnd: true, openingBalance: true, closingBalance: true, status: true, createdAt: true, deletedAt: true } }),
     prisma.notification.findMany({ where: { userId, channel: "IN_APP" }, orderBy: { createdAt: "asc" }, select: { type: true, title: true, body: true, createdAt: true, readAt: true } }),
     prisma.auditLog.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, select: { action: true, entityType: true, entityId: true, ipAddress: true, userAgent: true, createdAt: true } }),
+    prisma.debtLender.findMany({ where: { userId }, orderBy: { createdAt: "asc" } }),
+    prisma.debtMonthEntry.findMany({ where: { userId }, orderBy: [{ month: "asc" }, { lenderName: "asc" }] }),
   ]);
   return {
     exportedAt: new Date().toISOString(),
@@ -103,6 +105,8 @@ export async function buildFullExport(userId: string): Promise<FullExport> {
       Loans: clean(loanRows as Row[]),
       "Loan schedule": clean(schedule as Row[]),
       "Loan payments": clean(loanPayments as Row[]),
+      "Debt lenders": clean(debtLenders as Row[]),
+      "Debt tracker entries": clean(debtEntries as Row[]),
       "Investment accounts": clean(invAccounts as Row[]),
       Holdings: clean(holdings as Row[]),
       "Investment transactions": clean(invTxns as Row[]),
