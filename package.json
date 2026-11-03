@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 3010",
+    "dev": "prisma generate && next dev --port 3010",
     "build": "prisma migrate deploy && prisma db seed && next build",
     "start": "next start --port 3010",
     "lint": "eslint .",
@@ -18,7 +18,7 @@
     "db:down": "docker compose down",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy",
+    "db:deploy": "prisma migrate deploy && prisma generate",
     "db:seed": "prisma db seed",
     "db:reset": "prisma migrate reset",
     "db:studio": "prisma studio --port 5556",
