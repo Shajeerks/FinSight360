@@ -1,6 +1,7 @@
 import { parseAmount, parseDateWith, DATE_FORMATS, type DateFormat } from "@/lib/import/values";
 import { extractReference } from "@/lib/import/classify";
 import { Decimal, toDecimal } from "@/lib/money";
+import { labelsIn } from "@/lib/import/card-bill";
 
 /**
  * Heuristic transaction extractor for text-based bank / card statement PDFs.
@@ -23,19 +24,45 @@ export type PdfRow = {
   raw: string;
 };
 
-const DATE_AT_START = /^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}|\d{4}-\d{2}-\d{2})\b/;
-const AMOUNT = /(?:^|\s)(\(?-?(?:₹\s?)?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}\)?(?:\s*(?:Cr|Dr|CR|DR)\.?)?)(?=\s|$)/g;
+/** Dates banks print at the start of a row: 16/10/2026, 16-10-26, 16 Oct 2026, 16-OCT-26, 16Oct2026, Oct 16, 2026, 2026-10-16, 2026/10/16. */
+const DATE_AT_START = /^\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{1,2}[- ]?[A-Za-z]{3,4}[- ,']*\d{2,4}|[A-Za-z]{3,4}\.? \d{1,2},? \d{4}|\d{4}[-/]\d{2}[-/]\d{2})\b/;
+/** Money: 1,23,456.78 / 1234.50 / ₹ 1,200.00 / Rs.500.00 / INR 500.00 / 1,200 (grouped, no paise) / (500.00) / 500.00 Cr. */
+const AMOUNT = /(?:^|\s)(\(?(?:[-+]\s?)?(?:(?:₹|Rs\.?|INR)\s?)?(?:(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}|\d{1,3}(?:,\d{2,3})+)\)?(?:\s*(?:Cr|Dr|CR|DR|C|D)\.?)?)(?=\s|$)/g;
+const TIME_AT_START = /^\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?\b/;
+const MONTHS: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
 /** A serial-number column before the date ("1  01-10-2026 …", "12. 01 Oct 2026 …"), e.g. Kotak 811. */
 const SERIAL_BEFORE_DATE = /^\s*\d{1,5}[.)]?\s+(?=\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b|\d{1,2}[- ][A-Za-z]{3,4}[- ,]+\d{2,4}\b|\d{4}-\d{2}-\d{2}\b)/;
 const SKIP = /(opening balance|closing balance|balance b\/?f|brought forward|carried forward|statement of account|page \d+ of \d+|^\s*page\s+\d+|total|grand total)/i;
 
 function parseAnyDate(token: string): Date | null {
+  const t = token.trim();
+  // "Oct 16, 2026", "16Oct2026", "16-OCT-'26", "2026/10/16"
+  let m = /^([A-Za-z]{3,4})\.? (\d{1,2}),? (\d{4})$/.exec(t);
+  if (m && MONTHS[m[1].toLowerCase()]) return utc(+m[3], MONTHS[m[1].toLowerCase()], +m[2]);
+  m = /^(\d{1,2})[- ]?([A-Za-z]{3,4})[- ,']*(\d{2,4})$/.exec(t);
+  if (m && MONTHS[m[2].toLowerCase()]) return utc(m[3].length === 2 ? 2000 + +m[3] : +m[3], MONTHS[m[2].toLowerCase()], +m[1]);
+  m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(t);
+  if (m) return utc(+m[1], +m[2], +m[3]);
   for (const f of DATE_FORMATS as readonly DateFormat[]) {
     if (f === "MM/dd/yyyy") continue; // Indian statements use dd/MM
     const d = parseDateWith(token.replace(/,/g, " ").replace(/\s+/g, " "), f);
     if (d) return d;
   }
   return null;
+}
+
+/** parseAmount plus card-statement markers: a trailing "C"/"D" (SBI Card) and a leading "+" for credits. */
+function parseMoney(text: string) {
+  const t = text.trim().replace(/\s+([CD])\.?$/, (_, x: string) => (x === "C" ? " CR" : " DR"));
+  const p = parseAmount(t.replace(/^\+\s*/, ""));
+  if (p && !p.suffix && /^\+/.test(t)) return { ...p, suffix: "CR" as const };
+  return p;
+}
+
+function utc(y: number, m: number, d: number): Date | null {
+  if (y < 1990 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCDate() === d ? dt : null;
 }
 
 function trailingAmounts(rest: string) {
@@ -59,8 +86,15 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
   let openingBalance: string | null = null;
   let current: PdfRow | null = null;
 
-  for (const rawLine of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const rawLine = lines[li];
     let line = rawLine.replace(/ /g, " ");
+    // The values row under a bill-summary header ("Statement Date  Payment Due Date  Total
+    // Amount Due …" / "05/10/2026  25/10/2026  4,436.00 …") is not a transaction.
+    if (opts.accountKind === "card" && li > 0 && labelsIn(lines[li - 1]).length >= 2) {
+      current = null;
+      continue;
+    }
     // Skip a leading serial-number column so the row still starts with its date.
     const startsWithDate = DATE_AT_START.exec(line);
     if (!startsWithDate || !parseAnyDate(startsWithDate[1])) {
@@ -69,7 +103,7 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
     }
     if (/opening balance|balance b\/?f|brought forward/i.test(line)) {
       const amts = trailingAmounts(line);
-      const last = amts.length ? parseAmount(amts[amts.length - 1].text) : null;
+      const last = amts.length ? parseMoney(amts[amts.length - 1].text) : null;
       if (last && openingBalance === null) openingBalance = last.suffix === "DR" ? `-${last.amount.replace("-", "")}` : last.amount;
       current = null;
       continue;
@@ -81,10 +115,29 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
       // Many statements print a second (value) date right after the first.
       const second = DATE_AT_START.exec(rest);
       if (second && parseAnyDate(second[1])) rest = rest.slice(second[0].length);
-      const amts = trailingAmounts(rest);
+      rest = rest.replace(TIME_AT_START, "");
+      let amts = trailingAmounts(rest);
       if (!amts.length) {
-        current = null;
-        continue;
+        // The amounts are on a following line (a narration that wraps, or a PDF that puts each
+        // cell on its own line): join lines up to the first one that ends with amounts,
+        // stopping at the next dated row.
+        let joined = rest;
+        let used = 0;
+        for (let k = li + 1; k < Math.min(li + 5, lines.length); k++) {
+          const next = lines[k].replace(/\u00a0/g, " ");
+          const nd = DATE_AT_START.exec(next);
+          if ((nd && parseAnyDate(nd[1])) || SKIP.test(next)) break;
+          joined = `${joined}   ${next.trim()}`;
+          used = k - li;
+          if (trailingAmounts(joined).length) break;
+        }
+        amts = trailingAmounts(joined);
+        if (!amts.length) {
+          current = null;
+          continue;
+        }
+        rest = joined;
+        li += used;
       }
       // Drop a value-date column printed between the narration and the amounts.
       const description = rest
@@ -92,7 +145,7 @@ export function parseStatementLines(lines: string[], opts: { accountKind: "bank"
         .replace(/\s+\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\s*$/, "")
         .replace(/\s{2,}/g, " ")
         .trim();
-      const parsed = amts.map((a) => parseAmount(a.text)).filter((a): a is NonNullable<typeof a> => a !== null);
+      const parsed = amts.map((a) => parseMoney(a.text)).filter((a): a is NonNullable<typeof a> => a !== null);
       if (!parsed.length) continue;
       let txn = parsed[0];
       let balance: string | null = null;

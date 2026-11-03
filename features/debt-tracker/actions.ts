@@ -10,6 +10,7 @@ import {
   applyMatchedEmis,
   createDebtLender,
   deleteDebtLender,
+  saveCardBill,
   saveDebtEntry,
   undoDebtExcel,
   updateDebtLender,
@@ -29,6 +30,20 @@ export async function saveDebtEntryAction(input: unknown): Promise<ActionResult>
   const { user, meta } = await ctx();
   const res = await runAction(() => saveDebtEntry(user.id, input, meta), "Saved. Later months are re-calculated from this.");
   if (res.ok) refresh();
+  return res;
+}
+
+/** Save one lender's month: the figures you entered and, for a card, its bill. */
+export async function saveDebtMonthAction(entry: unknown, bill: unknown | null): Promise<ActionResult> {
+  const { user, meta } = await ctx();
+  const res = await runAction(async () => {
+    if (bill) await saveCardBill(user.id, bill, meta);
+    await saveDebtEntry(user.id, entry, meta);
+  }, "Saved. Later months are re-calculated from this.");
+  if (res.ok) {
+    refresh();
+    if (bill) for (const p of ["/credit-cards", "/dashboard", "/reminders"]) revalidatePath(p);
+  }
   return res;
 }
 

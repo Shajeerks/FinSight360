@@ -5,7 +5,7 @@ import { requireUser } from "@/lib/auth/session";
 import { resolvePageMonth } from "@/lib/page-month";
 import { Decimal, formatMoney } from "@/lib/money";
 import { formatDate, formatYearMonth, monthLabel, parseYearMonth } from "@/lib/dates";
-import { getDebtTrackerMonth, listDebtLenders } from "@/services/debt-tracker.service";
+import { getDebtTrackerMonth, listDebtLenders, type DueInfo, type DueStatus } from "@/services/debt-tracker.service";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +40,29 @@ function Change({ value }: { value: Decimal }) {
   return <span className={cn("tabular", down ? "text-success" : "text-destructive")}>{down ? "▼" : "▲"} {m2(value.abs())}</span>;
 }
 
+const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : "");
+
+const DUE_BADGE: Record<DueStatus, { label: string; variant: "success" | "warning" | "destructive" | "default" | "secondary" }> = {
+  PAID: { label: "Paid", variant: "success" },
+  MIN_PAID: { label: "Min. paid", variant: "warning" },
+  PART_PAID: { label: "Part paid", variant: "warning" },
+  DUE: { label: "Due", variant: "default" },
+  OVERDUE: { label: "Overdue", variant: "destructive" },
+  NO_DUE: { label: "No due", variant: "secondary" },
+};
+
+function DueCell({ due }: { due: DueInfo | null }) {
+  if (!due || !due.dueDate) return <td className="px-3 py-2.5 text-muted-foreground">—</td>;
+  const b = DUE_BADGE[due.status];
+  return (
+    <td className="whitespace-nowrap px-3 py-2.5">
+      <p className="tabular">{formatDate(due.dueDate)}{due.source === "entered" && <span className="ml-1 align-super text-[10px] text-primary">●</span>}</p>
+      <Badge variant={b.variant} className="mt-0.5 px-1.5 py-0 text-[10px]">{b.label}</Badge>
+      {due.amountDue && <p className="tabular text-[11px] text-muted-foreground">{due.label}: {m0(due.amountDue)}{due.minimumDue && due.minimumDue.greaterThan(0) ? ` · min ${m0(due.minimumDue)}` : ""}</p>}
+    </td>
+  );
+}
+
 function Cell({ value, entered, strong }: { value: Decimal | number | null; entered?: boolean; strong?: boolean }) {
   return (
     <td className={cn("tabular whitespace-nowrap px-3 py-2.5 text-right", strong && "font-semibold")}>
@@ -64,6 +87,12 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
   const t = d.totals;
   const principalPaid = Decimal.max(t.payment.minus(t.interest), 0);
   const pending = d.rows.flatMap((r) => r.pendingEmis.map((e) => ({ ...e, loanId: r.key.slice(5), lender: r.name })));
+  // Payments falling due in the selected month, earliest first.
+  const dues = d.rows
+    .filter((r) => r.due?.dueDate && r.due.dueDate.toISOString().slice(0, 7) === d.month && r.due.status !== "NO_DUE")
+    .sort((a, b) => a.due!.dueDate!.getTime() - b.due!.dueDate!.getTime());
+  const dueTotal = dues.reduce((a, r) => a.plus(r.due!.amountDue ? Decimal.max(r.due!.amountDue.minus(r.due!.paid), 0) : 0), new Decimal(0));
+  const overdue = dues.filter((r) => r.due!.status === "OVERDUE").length;
   const monthlyRate = t.opening.greaterThan(0) ? t.interest.dividedBy(t.opening).times(100) : null;
 
   const editData = (r: (typeof d.rows)[number]): EditRowData => ({
@@ -82,7 +111,19 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
       remainingEmis: r.row.remainingEmis === null ? null : String(r.row.remainingEmis),
     },
     entered: r.row.entered,
-    statementHint: r.statementHint ? { date: formatDate(r.statementHint.date), amount: r.statementHint.amount.toFixed(2), label: r.statementHint.label } : null,
+    bill: r.bill
+      ? {
+          statementDate: iso(r.bill.statementDate),
+          dueDate: iso(r.bill.dueDate),
+          totalDue: r.bill.totalDue.toFixed(2),
+          minimumDue: r.bill.minimumDue?.toFixed(2) ?? "",
+          purchases: r.bill.purchases?.toFixed(2) ?? "",
+          financeCharges: r.bill.financeCharges?.toFixed(2) ?? "",
+          source: r.bill.source,
+        }
+      : null,
+    dueDate: iso(r.entryDueDate),
+    autoDueDate: r.due && r.due.source !== "entered" && r.due.dueDate ? formatDate(r.due.dueDate) : null,
   });
 
   const actions = (
@@ -125,6 +166,30 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
             />
             <StatCard title={`Interest in ${d.fy.label}`} value={m0(d.fy.interest)} icon={CalendarRange} sub={`Paid ${m0(d.fy.payment)} since April`} />
           </section>
+
+          {dues.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Due in {label}</CardTitle>
+                <CardDescription>
+                  {m0(dueTotal)} still to pay across {dues.length} payment(s){overdue ? ` · ${overdue} overdue` : ""}. Card due dates come from your uploaded statements; EMI dates from the loan schedule.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {dues.map((r) => (
+                    <li key={r.key} className={cn("flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm", r.due!.status === "OVERDUE" && "border-destructive/40 bg-destructive/5")}>
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{r.name}</p>
+                        <p className="text-xs text-muted-foreground">{formatDate(r.due!.dueDate)}{r.due!.amountDue ? ` · ${m0(r.due!.amountDue)}` : ""}{r.due!.paid.greaterThan(0) ? ` · paid ${m0(r.due!.paid)}` : ""}</p>
+                      </div>
+                      <Badge variant={DUE_BADGE[r.due!.status].variant}>{DUE_BADGE[r.due!.status].label}</Badge>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
 
           {pending.length > 0 && (
             <Card className="border-primary/40">
@@ -187,11 +252,12 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
             <CardContent className="px-0 sm:px-6">
               {/* Desktop / tablet: the full sheet */}
               <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[1080px] text-sm [&_td]:px-2 [&_th]:px-2">
+                <table className="w-full min-w-[1180px] text-sm [&_td]:px-2 [&_th]:px-2">
                   <thead>
                     <tr className="border-b text-left text-xs text-muted-foreground">
                       <th className="px-3 py-2 font-medium">SI#</th>
                       <th className="px-3 py-2 font-medium">Lender</th>
+                      <th className="px-3 py-2 font-medium">Due date</th>
                       <th className="px-3 py-2 text-right font-medium">Total outstanding</th>
                       <th className="px-3 py-2 text-right font-medium">New spends / borrowing</th>
                       <th className="px-3 py-2 text-right font-medium">Current month payment</th>
@@ -216,6 +282,7 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
                           {r.notes.map((n) => <p key={n.text} className="text-[11px] leading-snug text-muted-foreground">{n.text}</p>)}
                           {!r.row.unreconciled.isZero() && <p className="text-[11px] text-amber-700 dark:text-warning">Entered figures differ by {m2(r.row.unreconciled)}</p>}
                         </td>
+                        <DueCell due={r.due} />
                         <Cell value={r.row.opening} entered={r.row.entered.includes("opening")} />
                         <Cell value={r.row.newBorrowing} entered={r.row.entered.includes("newBorrowing")} />
                         <Cell value={r.row.payment} entered={r.row.entered.includes("payment")} />
@@ -234,7 +301,7 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
                   </tbody>
                   <tfoot>
                     <tr className="border-t-2 bg-muted/40 font-semibold">
-                      <td className="px-3 py-2.5" colSpan={2}>Total ({d.rows.length})</td>
+                      <td className="px-3 py-2.5" colSpan={3}>Total ({d.rows.length})</td>
                       <Cell value={t.opening} />
                       <Cell value={t.newBorrowing} />
                       <Cell value={t.payment} />
@@ -257,6 +324,12 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
                       <div className="min-w-0">
                         <p className="truncate font-medium">{i + 1}. {r.name} <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{KIND_LABEL[r.kind]}</Badge></p>
                         <p className="truncate text-xs text-muted-foreground">{r.detail}</p>
+                        {r.due?.dueDate && (
+                          <p className="mt-0.5 flex items-center gap-1.5 text-xs">
+                            Due {formatDate(r.due.dueDate)}
+                            <Badge variant={DUE_BADGE[r.due.status].variant} className="px-1.5 py-0 text-[10px]">{DUE_BADGE[r.due.status].label}</Badge>
+                          </p>
+                        )}
                       </div>
                       <EditEntryDialog row={editData(r)} />
                     </div>

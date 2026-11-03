@@ -1039,6 +1039,8 @@ model TransactionImport {
   columnMapping          Json?
   /// Account opening balance before this import set it from the statement (restored on undo).
   previousOpeningBalance Decimal?     @db.Decimal(18, 2)
+  /// Card's bill fields (statement date, due date, totals) before this import updated them (restored on undo).
+  previousCardBill       Json?
   dateFormat             String?
   amountMode             AmountMode?
   /// PDF: share of rows whose debit/credit was verified by the running balance.
@@ -1545,6 +1547,11 @@ model Statement {
   closingBalance Decimal?        @db.Decimal(18, 2)
   totalDue       Decimal?        @db.Decimal(18, 2)
   minimumDue     Decimal?        @db.Decimal(18, 2)
+  /// Card bill summary as printed on the statement (read from the PDF or typed in).
+  previousBalance Decimal?       @db.Decimal(18, 2)
+  purchases       Decimal?       @db.Decimal(18, 2)
+  paymentsCredits Decimal?       @db.Decimal(18, 2)
+  financeCharges  Decimal?       @db.Decimal(18, 2)
   status         StatementStatus @default(UPLOADED)
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
@@ -1692,6 +1699,8 @@ model DebtMonthEntry {
   interest           Decimal?        @db.Decimal(18, 2)
   closingOutstanding Decimal?        @db.Decimal(18, 2)
   remainingEmis      Int?
+  /// Payment due date for this month (loans / other lenders; cards use their statement).
+  dueDate            DateTime?       @db.Date
   source             DebtEntrySource @default(MANUAL)
   notes              String?
   createdAt          DateTime        @default(now())

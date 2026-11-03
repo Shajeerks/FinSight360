@@ -25,8 +25,9 @@ import {
   type MonthOverride,
 } from "@/lib/finance/debt-tracker";
 import { readDebtWorkbook } from "@/lib/import/debt-excel";
-import { applyEmiSchema, debtEntrySchema, debtExcelCommitSchema, debtLenderSchema, lenderKeySchema, monthParam } from "@/validators/debt-tracker";
+import { applyEmiSchema, cardBillSchema, debtEntrySchema, debtExcelCommitSchema, debtLenderSchema, lenderKeySchema, monthParam } from "@/validators/debt-tracker";
 import { recordLoanPayment } from "@/services/loan.service";
+import { syncCardBill } from "@/services/card-bill.service";
 
 /**
  * Debt tracker: one sheet per calendar month, one row per lender (credit cards,
@@ -56,9 +57,43 @@ export type TrackerLender = {
   /** Per month: where the numbers came from, EMIs found in bank statements not yet applied. */
   notes: Map<MonthKey, SourceNote[]>;
   pendingEmis: Map<MonthKey, MatchedEmi[]>;
-  statementHint: Map<MonthKey, { date: Date; amount: Decimal; label: string }>;
+  /** Card bills by the month they were generated in. */
+  bills: Map<MonthKey, BillInfo>;
+  /** Payment due per month (card bill / EMI due date / a date you entered). */
+  dues: Map<MonthKey, DueInfo>;
   annualRatePct: Decimal | null;
 };
+
+export type BillInfo = {
+  statementId: string | null;
+  source: "upload" | "manual" | "card";
+  statementDate: Date;
+  dueDate: Date | null;
+  totalDue: Decimal;
+  minimumDue: Decimal | null;
+  purchases: Decimal | null;
+  paymentsCredits: Decimal | null;
+  financeCharges: Decimal | null;
+  previousBalance: Decimal | null;
+};
+
+export type DueStatus = "PAID" | "MIN_PAID" | "PART_PAID" | "DUE" | "OVERDUE" | "NO_DUE";
+export type DueInfo = { dueDate: Date | null; amountDue: Decimal | null; minimumDue: Decimal | null; paid: Decimal; status: DueStatus; source: "statement" | "schedule" | "entered"; label: string };
+
+const fmtDay = (d: Date) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" });
+
+function dueStatus(i: { dueDate: Date | null; amountDue: Decimal | null; minimumDue: Decimal | null; paid: Decimal; today: Date; source: DueInfo["source"]; label: string }): DueInfo {
+  const amount = i.amountDue;
+  let status: DueStatus;
+  if (amount !== null && amount.lessThanOrEqualTo(0)) status = "NO_DUE";
+  else if (amount !== null && i.paid.greaterThanOrEqualTo(amount.minus(1))) status = "PAID";
+  else if (amount === null && i.paid.greaterThan(0)) status = "PAID";
+  else if (i.minimumDue && i.minimumDue.greaterThan(0) && i.paid.greaterThanOrEqualTo(i.minimumDue)) status = "MIN_PAID";
+  else if (i.dueDate && i.today > i.dueDate) status = "OVERDUE";
+  else if (i.paid.greaterThan(0)) status = "PART_PAID";
+  else status = "DUE";
+  return { dueDate: i.dueDate, amountDue: amount, minimumDue: i.minimumDue, paid: roundMoney(i.paid), status, source: i.source, label: i.label };
+}
 
 // ───────────────────────────── helpers ─────────────────────────────
 
@@ -145,9 +180,10 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
         bankAccount: { select: { nickname: true } }, cashAccount: { select: { name: true } },
       },
     }),
+    // Card bills: statements with a total due (uploaded or typed in).
     prisma.statement.findMany({
-      where: { userId, deletedAt: null, type: "CREDIT_CARD", creditCardId: { not: null }, OR: [{ totalDue: { not: null } }, { closingBalance: { not: null } }] },
-      select: { creditCardId: true, statementDate: true, periodEnd: true, totalDue: true, closingBalance: true },
+      where: { userId, deletedAt: null, type: "CREDIT_CARD", creditCardId: { not: null }, totalDue: { not: null }, statementDate: { not: null } },
+      select: { id: true, creditCardId: true, importId: true, createdAt: true, statementDate: true, dueDate: true, totalDue: true, minimumDue: true, purchases: true, paymentsCredits: true, financeCharges: true, previousBalance: true },
     }),
   ]);
 
@@ -162,26 +198,47 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
 
   const out: TrackerLender[] = [];
 
-  // ── Credit cards: ledger movements per month ──
+  // ── Credit cards: billing cycles ──
+  // A month's row covers the cycle that ends on the bill generated that month (or the
+  // month end when there's no bill yet). A bill's total due IS that month's remaining
+  // balance; interest & charges are then the balancing figure.
   for (const card of cards) {
     const key = `card:${card.id}`;
-    const txns = cardTxns.filter((t) => t.creditCardId === card.id);
-    const months = byMonth(txns);
-    const start = minKey(firstEntered(key), [...months.keys()].sort()[0], monthKey(card.createdAt)) ?? current;
+    const txns = cardTxns.filter((t) => t.creditCardId === card.id).sort((a, b) => a.transactionDate.getTime() - b.transactionDate.getTime());
+    const bills = new Map<MonthKey, BillInfo>();
+    for (const s of cardStatements.filter((x) => x.creditCardId === card.id).sort((a, b) => a.statementDate!.getTime() - b.statementDate!.getTime() || a.createdAt.getTime() - b.createdAt.getTime())) {
+      bills.set(monthKey(s.statementDate!), {
+        statementId: s.id,
+        source: s.importId ? "upload" : "manual",
+        statementDate: s.statementDate!,
+        dueDate: s.dueDate,
+        totalDue: s.totalDue!,
+        minimumDue: s.minimumDue,
+        purchases: s.purchases,
+        paymentsCredits: s.paymentsCredits,
+        financeCharges: s.financeCharges,
+        previousBalance: s.previousBalance,
+      });
+    }
+    // The bill typed on the card itself (Credit Cards page) when no statement covers that month.
+    if (card.lastStatementDate && card.totalAmountDue.greaterThan(0) && !bills.has(monthKey(card.lastStatementDate))) {
+      bills.set(monthKey(card.lastStatementDate), { statementId: null, source: "card", statementDate: card.lastStatementDate, dueDate: card.currentDueDate, totalDue: card.totalAmountDue, minimumDue: card.minimumAmountDue, purchases: null, paymentsCredits: null, financeCharges: null, previousBalance: null });
+    }
+    const firstTxn = txns[0] ? monthKey(txns[0].transactionDate) : null;
+    const firstBill = [...bills.keys()].sort()[0];
+    const start = minKey(firstEntered(key), firstTxn, firstBill, monthKey(card.createdAt)) ?? current;
     const range = monthsBetween(start < floor ? floor : start, current);
+    const periodEnd = (m: MonthKey) => bills.get(m)?.statementDate ?? monthEnd(m);
     const notes = new Map<MonthKey, SourceNote[]>();
-    const statementHint = new Map<MonthKey, { date: Date; amount: Decimal; label: string }>();
-    for (const s of cardStatements.filter((x) => x.creditCardId === card.id)) {
-      const d = s.statementDate ?? s.periodEnd;
-      const amt = s.totalDue ?? s.closingBalance;
-      if (d && amt) statementHint.set(monthKey(d), { date: d, amount: amt, label: "Uploaded statement" });
-    }
-    if (card.lastStatementDate && card.totalAmountDue.greaterThan(0)) {
-      statementHint.set(monthKey(card.lastStatementDate), { date: card.lastStatementDate, amount: card.totalAmountDue, label: "Statement on the card" });
-    }
+    const billOf = new Map<MonthKey, BillInfo>();
+    let prevEnd: Date | null = null;
     const auto = (m: MonthKey): AutoMonth => {
+      const from = prevEnd ? new Date(prevEnd.getTime() + 86400000) : monthStart(m);
+      const to = periodEnd(m);
+      prevEnd = to;
+      const inCycle = txns.filter((t) => t.transactionDate >= from && t.transactionDate <= to);
       let spends = ZERO, payment = ZERO, charges = ZERO;
-      for (const t of months.get(m) ?? []) {
+      for (const t of inCycle) {
         const amt = toDecimal(t.amount);
         if (t.transactionType === "CARD_PAYMENT") payment = payment.plus(amt);
         else if (t.transactionType === "BORROWING") spends = spends.plus(amt);
@@ -189,11 +246,23 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
         else if (t.direction === "DEBIT") spends = spends.plus(amt);
         else spends = spends.minus(amt); // refunds / reversals
       }
+      const bill = bills.get(m);
       const n: SourceNote[] = [];
-      if (months.get(m)?.length) n.push({ kind: "ledger", text: `${months.get(m)!.length} card transaction(s) in FinSight360` });
-      else n.push({ kind: "ledger", text: "No card transactions this month — upload the card statement, or enter the closing balance from it." });
+      const cycle = `${fmtDay(from)} – ${fmtDay(to)}`;
+      const spendTxns = inCycle.filter((t) => t.transactionType !== "CARD_PAYMENT").length;
+      if (bill) {
+        billOf.set(m, bill);
+        n.push({ kind: "statement", text: `Bill of ${fmtDay(bill.statementDate)} (${bill.source === "upload" ? "uploaded statement" : bill.source === "manual" ? "entered by you" : "from the card"}): total due ₹${bill.totalDue.toFixed(2)} · cycle ${cycle}` });
+        // Card statement not uploaded (no card spends in the ledger for the bill's month): use the purchases printed on the bill.
+        const billWindow = new Date(bill.statementDate.getTime() - 35 * 86400000);
+        const ledgerSpends = txns.some((t) => t.transactionType !== "CARD_PAYMENT" && t.transactionDate > billWindow && t.transactionDate <= bill.statementDate);
+        if (!ledgerSpends && bill.purchases) spends = toDecimal(bill.purchases);
+        if (!ledgerSpends && !bill.purchases && spendTxns === 0) n.push({ kind: "ledger", text: "Spends aren't known for this cycle (card statement not uploaded), so they're included in interest & charges." });
+      } else {
+        n.push({ kind: "ledger", text: inCycle.length ? `${inCycle.length} card transaction(s) · ${cycle}` : `No card transactions · ${cycle}. Upload the card statement or add this month's bill.` });
+      }
       notes.set(m, n);
-      return { newBorrowing: spends, payment, interest: () => charges, remainingEmis: null };
+      return { newBorrowing: spends, payment, interest: () => charges, closing: bill ? toDecimal(bill.totalDue) : null, remainingEmis: null };
     };
     // Outstanding before the first month shown = opening + everything before it.
     const before = txns.filter((t) => monthKey(t.transactionDate) < range[0]);
@@ -204,6 +273,20 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       return acc.minus(amt);
     }, toDecimal(card.openingOutstanding));
     const paidBefore = sum(before.filter((t) => t.transactionType === "CARD_PAYMENT").map((t) => t.amount));
+    const months = buildLenderMonths(range, baseOpening, paidBefore, auto, overridesFor(key));
+
+    // Due date per month: the bill falling due this month, else the bill generated this month.
+    const allBills = [...bills.values()].sort((a, b) => a.statementDate.getTime() - b.statementDate.getTime());
+    const dues = new Map<MonthKey, DueInfo>();
+    for (const m of range) {
+      const bill = allBills.find((b) => b.dueDate && monthKey(b.dueDate) === m) ?? billOf.get(m);
+      if (!bill) continue;
+      const next = allBills.find((b) => b.statementDate > bill.statementDate);
+      const until = next ? next.statementDate : today;
+      let paid = sum(txns.filter((t) => t.transactionType === "CARD_PAYMENT" && t.transactionDate > bill.statementDate && t.transactionDate <= until).map((t) => t.amount));
+      if (!next && card.lastStatementDate?.getTime() === bill.statementDate.getTime()) paid = paid.plus(card.paidOnBill);
+      dues.set(m, dueStatus({ dueDate: bill.dueDate, amountDue: bill.totalDue, minimumDue: bill.minimumDue, paid, today, source: "statement", label: `Bill of ${fmtDay(bill.statementDate)}` }));
+    }
     out.push({
       key,
       name: `${card.bankName} ${card.cardName}`.trim(),
@@ -211,10 +294,11 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       detail: `Credit card ••${card.last4}`,
       href: `/credit-cards`,
       closed: card.status === "CLOSED",
-      months: buildLenderMonths(range, baseOpening, paidBefore, auto, overridesFor(key)),
+      months,
       notes,
       pendingEmis: new Map(),
-      statementHint,
+      bills,
+      dues,
       annualRatePct: null,
     });
   }
@@ -310,6 +394,14 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
     };
     const pendingEmis = new Map<MonthKey, MatchedEmi[]>();
     for (const [k, v] of matchedByMonth) pendingEmis.set(k, v);
+    const months = buildLenderMonths(range, ZERO, ZERO, auto, overridesFor(key));
+    // EMI due date for the month from the schedule; paid = what was paid in the month.
+    const dues = new Map<MonthKey, DueInfo>();
+    for (const r of months) {
+      const row = loan.schedule.filter((x) => monthKey(x.dueDate) === r.month).sort((a, b) => a.installmentNumber - b.installmentNumber)[0];
+      if (!row) continue;
+      dues.set(r.month, dueStatus({ dueDate: row.dueDate, amountDue: toDecimal(loan.emiAmount), minimumDue: null, paid: r.payment, today, source: "schedule", label: `EMI #${row.installmentNumber}` }));
+    }
     out.push({
       key,
       name: loan.lender === loan.name ? loan.name : `${loan.lender} — ${loan.name}`,
@@ -317,10 +409,11 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       detail: `${loan.loanType.charAt(0)}${loan.loanType.slice(1).toLowerCase()} loan · EMI ₹${toDecimal(loan.emiAmount).toFixed(0)} · ${toDecimal(loan.interestRate).toFixed(2)}%`,
       href: `/loans/${loan.id}`,
       closed: loan.status !== "ACTIVE",
-      months: buildLenderMonths(range, ZERO, ZERO, auto, overridesFor(key)),
+      months,
       notes,
       pendingEmis,
-      statementHint: new Map(),
+      bills: new Map(),
+      dues,
       annualRatePct: toDecimal(loan.interestRate),
     });
   }
@@ -361,9 +454,20 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       months: buildLenderMonths(range, baseOpening, 0, auto, overridesFor(key)),
       notes,
       pendingEmis: new Map(),
-      statementHint: new Map(),
+      bills: new Map(),
+      dues: new Map(),
       annualRatePct: toDecimal(l.monthlyRatePct).times(12),
     });
+  }
+
+  // A due date you entered for a month replaces the automatic one.
+  for (const l of out) {
+    for (const [m, e] of entryMap.get(l.key) ?? []) {
+      if (!e.dueDate) continue;
+      const row = l.months.find((r) => r.month === m);
+      const auto = l.dues.get(m);
+      l.dues.set(m, dueStatus({ dueDate: e.dueDate, amountDue: auto?.amountDue ?? null, minimumDue: auto?.minimumDue ?? null, paid: auto?.paid ?? row?.payment ?? ZERO, today, source: "entered", label: auto?.label ?? "Due date" }));
+    }
   }
 
   // Lenders in entries whose card/loan/lender was deleted are dropped (their entries stay, harmless).
@@ -400,7 +504,9 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
         row,
         notes: l.notes.get(selected) ?? [],
         pendingEmis: l.pendingEmis.get(selected) ?? [],
-        statementHint: l.statementHint.get(selected) ?? null,
+        bill: l.bills.get(selected) ?? null,
+        due: l.dues.get(selected) ?? null,
+        entryDueDate: l.dues.get(selected)?.source === "entered" ? l.dues.get(selected)!.dueDate : null,
         rate: effectiveRate(row.interest, row.opening),
         annualRatePct: l.annualRatePct,
       };
@@ -519,6 +625,7 @@ export async function saveDebtEntry(userId: string, input: unknown, meta: Reques
     interest: d.interest === null ? null : toDecimal(d.interest),
     closingOutstanding: d.closingOutstanding === null ? null : toDecimal(d.closingOutstanding),
     remainingEmis: d.remainingEmis,
+    dueDate: d.dueDate,
     notes: d.notes,
   };
   const empty = Object.values(values).every((v) => v === null);
@@ -532,6 +639,60 @@ export async function saveDebtEntry(userId: string, input: unknown, meta: Reques
     });
   }
   await audit({ userId, action: AuditAction.DEBT_ENTRY_SAVED, entityType: "DebtMonthEntry", entityId: d.lenderKey, ip: meta.ip, userAgent: meta.userAgent, metadata: { month: d.month, cleared: empty } });
+}
+
+/**
+ * Add or correct a card's bill for a month (statement date, due date, totals). It's
+ * stored as a statement, so the Credit Cards page, reminders and the tracker all use it.
+ * A bill read from an uploaded statement can be corrected here; one you typed can be removed.
+ */
+export async function saveCardBill(userId: string, input: unknown, meta: RequestMeta = NO_META) {
+  const d = parseOrThrow(cardBillSchema, input);
+  const card = await prisma.creditCard.findFirst({ where: { id: d.cardId, userId, deletedAt: null }, select: { id: true } });
+  if (!card) throw new NotFoundError("Card not found.");
+  const from = monthStart(d.month);
+  const to = monthEnd(d.month);
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.statement.findFirst({
+      where: { userId, creditCardId: card.id, type: "CREDIT_CARD", deletedAt: null, totalDue: { not: null }, statementDate: { gte: from, lte: to } },
+      orderBy: [{ statementDate: "desc" }, { createdAt: "desc" }],
+    });
+    if (d.totalDue === null) {
+      // Remove the bill typed for this month (an uploaded one stays — undo its import instead).
+      if (existing && !existing.importId) {
+        const card2 = await tx.creditCard.findUnique({ where: { id: card.id }, select: { lastStatementDate: true } });
+        await tx.statement.update({ where: { id: existing.id }, data: { deletedAt: new Date() } });
+        if (card2?.lastStatementDate?.getTime() === existing.statementDate?.getTime()) {
+          const synced = await syncCardBill(tx, card.id, { force: true });
+          // It was the only bill: the card no longer has a bill on record.
+          if (!synced) await tx.creditCard.update({ where: { id: card.id }, data: { lastStatementDate: null, currentDueDate: null, totalAmountDue: 0, minimumAmountDue: 0, paidOnBill: 0 } });
+        }
+      } else if (existing) {
+        throw new AppError("This bill comes from an uploaded statement. Correct its figures, or undo that import to remove it.", 409, "BILL_FROM_UPLOAD", { totalDue: ["Required"] });
+      }
+      await audit({ userId, action: AuditAction.DEBT_ENTRY_SAVED, entityType: "Statement", entityId: existing?.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { month: d.month, bill: "removed" } }, tx);
+      return null;
+    }
+    if (d.statementDate < from || d.statementDate > to) {
+      throw new AppError(`The statement date must be in ${d.month}.`, 400, "WRONG_MONTH", { statementDate: ["Pick a date in this month"] });
+    }
+    const dec = (v: string | null) => (v === null ? null : roundMoney(v));
+    const data = {
+      statementDate: d.statementDate,
+      dueDate: d.dueDate,
+      totalDue: roundMoney(d.totalDue),
+      closingBalance: roundMoney(d.totalDue),
+      minimumDue: dec(d.minimumDue),
+      purchases: dec(d.purchases),
+      financeCharges: dec(d.financeCharges),
+    };
+    const bill = existing
+      ? await tx.statement.update({ where: { id: existing.id }, data })
+      : await tx.statement.create({ data: { userId, type: "CREDIT_CARD", creditCardId: card.id, status: "PROCESSED", ...data } });
+    await syncCardBill(tx, card.id);
+    await audit({ userId, action: AuditAction.DEBT_ENTRY_SAVED, entityType: "Statement", entityId: bill.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { month: d.month, bill: existing ? "updated" : "added" } }, tx);
+    return bill;
+  });
 }
 
 export async function getDebtEntry(userId: string, month: string, lenderKey: string) {

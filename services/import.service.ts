@@ -10,6 +10,8 @@ import { saveFile, sha256 } from "@/lib/storage";
 import { classifyImported, detectInstitution, extractReference } from "@/lib/import/classify";
 import { detectFileKind, extractPdfLines, MAX_UPLOAD_BYTES, parseCsv, parseXlsx, PdfPasswordError, type FileKind } from "@/lib/import/files";
 import { parseStatementLines } from "@/lib/import/pdf-statement";
+import { extractCardBill, hasBill, type CardBill } from "@/lib/import/card-bill";
+import { cardBillSnapshot, latestBill, restoreCardBill, syncCardBill, type CardBillSnapshot } from "@/services/card-bill.service";
 import { normalizeDescription } from "@/lib/transactions/normalize";
 import { countableWhere } from "@/lib/transactions/countable";
 import {
@@ -123,6 +125,7 @@ export async function createImport(userId: string, input: UploadInput, meta: Req
   let rawRows: string[][] = [];
   let pdf: ReturnType<typeof parseStatementLines> | null = null;
   let institutionText = "";
+  let cardBill: CardBill | null = null;
   if (fileKind === "PDF") {
     let lines: string[];
     try {
@@ -144,6 +147,11 @@ export async function createImport(userId: string, input: UploadInput, meta: Req
     pdf = parseStatementLines(lines, { accountKind: kind });
     if (!pdf.rows.length) throw new AppError("No transactions were found in this PDF. Try the CSV or XLSX export from your bank.", 422, "NO_ROWS");
     institutionText = lines.slice(0, 60).join(" ");
+    // Card statements: the bill summary (statement date, due date, total / minimum due, charges).
+    if (kind === "card") {
+      const b = extractCardBill(lines);
+      if (hasBill(b)) cardBill = b;
+    }
   } else {
     try {
       rawRows = fileKind === "CSV" ? parseCsv(buffer) : await parseXlsx(buffer);
@@ -227,7 +235,7 @@ export async function createImport(userId: string, input: UploadInput, meta: Req
         })),
       });
       await tx.statement.create({
-        data: { userId, type: kind === "bank" ? "BANK" : "CREDIT_CARD", bankAccountId: kind === "bank" ? id : null, creditCardId: kind === "card" ? id : null, importId: created.id, attachmentId: attachment.id, openingBalance: pdf.openingBalance ? toDecimal(pdf.openingBalance) : null, status: "PROCESSING" },
+        data: { userId, type: kind === "bank" ? "BANK" : "CREDIT_CARD", bankAccountId: kind === "bank" ? id : null, creditCardId: kind === "card" ? id : null, importId: created.id, attachmentId: attachment.id, openingBalance: pdf.openingBalance ? toDecimal(pdf.openingBalance) : null, status: "PROCESSING", ...billColumns(cardBill) },
       });
     } else {
       for (let i = 0; i < rawRows.length; i += 1000) {
@@ -518,7 +526,20 @@ export async function cancelImport(userId: string, importId: string, meta: Reque
 
 // ───────────────────────────── commit ─────────────────────────────
 
-export type ImportSummary = { created: number; linked: number; possibleDuplicates: number; pendingReview: number; skipped: number; invalid: number; openingBalanceSet?: string };
+export type ImportSummary = {
+  created: number; linked: number; possibleDuplicates: number; pendingReview: number; skipped: number; invalid: number; openingBalanceSet?: string;
+  /** Card statements: the bill read from the PDF. */
+  cardBill?: { statementDate: string | null; dueDate: string | null; totalDue: string | null; minimumDue: string | null; appliedToCard: boolean };
+};
+
+function billColumns(b: CardBill | null) {
+  if (!b) return {};
+  const d = (v: string | null) => (v === null ? null : toDecimal(v));
+  return {
+    statementDate: b.statementDate, dueDate: b.dueDate, totalDue: d(b.totalDue), minimumDue: d(b.minimumDue),
+    previousBalance: d(b.previousBalance), purchases: d(b.purchases), paymentsCredits: d(b.paymentsCredits), financeCharges: d(b.financeCharges),
+  };
+}
 
 /**
  * Writes the reviewed rows to the ledger in ONE database transaction:
@@ -680,7 +701,19 @@ async function commitImportTx(userId: string, importId: string, meta: RequestMet
     if (openingBalanceSet !== null) summary.openingBalanceSet = openingBalanceSet;
 
     await recomputeAffected(tx, affected);
-    await tx.statement.update({ where: { id: statement.id }, data: { periodStart: minDate, periodEnd: maxDate, statementDate: maxDate, closingBalance: lastBalance, status: "PROCESSED" } });
+    // A card bill keeps the dates and totals printed on it; otherwise the last row's date / balance.
+    const isBill = account.kind === "card" && statement.totalDue !== null;
+    await tx.statement.update({
+      where: { id: statement.id },
+      data: { periodStart: minDate, periodEnd: maxDate, statementDate: statement.statementDate ?? maxDate, closingBalance: isBill ? statement.totalDue : lastBalance, status: "PROCESSED" },
+    });
+    if (isBill && imp.creditCardId) {
+      const before = await cardBillSnapshot(tx, imp.creditCardId);
+      const applied = await syncCardBill(tx, imp.creditCardId);
+      if (applied && before) await tx.transactionImport.update({ where: { id: importId }, data: { previousCardBill: before } });
+      const day = (x: Date | null) => (x ? x.toISOString().slice(0, 10) : null);
+      summary.cardBill = { statementDate: day(statement.statementDate ?? maxDate), dueDate: day(statement.dueDate), totalDue: statement.totalDue?.toFixed(2) ?? null, minimumDue: statement.minimumDue?.toFixed(2) ?? null, appliedToCard: applied };
+    }
     await tx.transactionImport.update({
       where: { id: importId },
       data: {
@@ -765,7 +798,20 @@ export async function undoImport(userId: string, importId: string, meta: Request
     }
     await lockForWrite(tx, affected);
     await recomputeAffected(tx, affected);
+    const undoneBills = await tx.statement.findMany({ where: { importId, deletedAt: null, totalDue: { not: null } }, select: { statementDate: true } });
     await tx.statement.updateMany({ where: { importId }, data: { deletedAt: new Date() } });
+    // The card showed this statement's bill: go back to the newest remaining bill, or to what it showed before.
+    if (imp.creditCardId && undoneBills.length) {
+      const card = await tx.creditCard.findUnique({ where: { id: imp.creditCardId }, select: { lastStatementDate: true } });
+      const showsUndone = card?.lastStatementDate && undoneBills.some((b) => b.statementDate?.getTime() === card.lastStatementDate!.getTime());
+      if (showsUndone) {
+        const before = imp.previousCardBill as unknown as CardBillSnapshot | null;
+        const latest = await latestBill(tx, imp.creditCardId);
+        const latestDay = latest?.statementDate?.toISOString().slice(0, 10) ?? "";
+        if (before && (!latest || (before.lastStatementDate ?? "") > latestDay)) await restoreCardBill(tx, imp.creditCardId, before);
+        else await syncCardBill(tx, imp.creditCardId, { force: true });
+      }
+    }
     await tx.transactionImport.update({ where: { id: importId }, data: { status: "CANCELLED", previousOpeningBalance: null } });
     await audit({ userId, action: AuditAction.IMPORT_UNDONE, entityType: "TransactionImport", entityId: importId, ip: meta.ip, userAgent: meta.userAgent, metadata: { removed, detached } }, tx);
     return { removed, detached };

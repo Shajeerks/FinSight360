@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { idSchema, moneySchema, optionalDate, optionalText } from "@/validators/common";
+import { dateSchema, idSchema, moneySchema, optionalDate, optionalText } from "@/validators/common";
 
 export const monthParam = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Invalid month");
 export const lenderKeySchema = z.string().regex(/^(card|loan|lender):[A-Za-z0-9_-]{1,64}$/, "Invalid lender");
@@ -24,6 +24,7 @@ export const debtEntrySchema = z.object({
     .union([z.literal(""), z.null(), z.coerce.number().int("Whole number").min(0, "Can't be negative").max(600)])
     .optional()
     .transform((v) => (typeof v === "number" ? v : null)),
+  dueDate: optionalDate,
   notes: optionalText(300),
 });
 export type DebtEntryInput = z.input<typeof debtEntrySchema>;
@@ -63,3 +64,26 @@ export const debtExcelCommitSchema = z.object({
   /** Replace figures you already entered for the same lender and month. */
   overwrite: z.boolean().default(false),
 });
+
+/** A card's bill for one month. An empty total due removes a bill you typed. */
+export const cardBillSchema = z
+  .object({
+    cardId: idSchema,
+    month: monthParam,
+    statementDate: z.union([dateSchema, z.literal(""), z.null()]).optional().transform((v) => (v instanceof Date ? v : null)),
+    dueDate: optionalDate,
+    totalDue: optionalAmount,
+    minimumDue: optionalNonNegative,
+    purchases: optionalAmount,
+    financeCharges: optionalNonNegative,
+  })
+  .superRefine((v, ctx) => {
+    if (v.totalDue === null) return;
+    if (!v.statementDate) ctx.addIssue({ code: "custom", path: ["statementDate"], message: "Enter the statement date" });
+    if (v.statementDate && v.dueDate && (v.dueDate < v.statementDate || v.dueDate.getTime() - v.statementDate.getTime() > 60 * 86400000)) {
+      ctx.addIssue({ code: "custom", path: ["dueDate"], message: "Due date should be within 60 days after the statement date" });
+    }
+    if (v.minimumDue !== null && Number(v.minimumDue) > Math.max(Number(v.totalDue), 0)) ctx.addIssue({ code: "custom", path: ["minimumDue"], message: "Can't be more than the total due" });
+  })
+  .transform((v) => ({ ...v, statementDate: v.statementDate as Date }));
+export type CardBillInput = z.input<typeof cardBillSchema>;

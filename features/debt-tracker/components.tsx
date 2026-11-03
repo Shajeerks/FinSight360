@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { CheckCheck, FileSpreadsheet, FileUp, Loader2, Pencil, Plus, RotateCcw, Trash2, Wand2 } from "lucide-react";
+import { CheckCheck, FileSpreadsheet, FileUp, Loader2, Pencil, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ConfirmButton } from "@/components/ui/confirm-button";
 import { Alert } from "@/components/ui/alert";
 import { inr } from "@/features/dashboard/format-client";
-import { applyAllEmisAction, applyEmiAction, deleteDebtLenderAction, saveDebtEntryAction, saveDebtLenderAction, undoDebtExcelAction } from "@/features/debt-tracker/actions";
+import { applyAllEmisAction, applyEmiAction, deleteDebtLenderAction, saveDebtMonthAction, saveDebtLenderAction, undoDebtExcelAction } from "@/features/debt-tracker/actions";
 
 // ───────────────────────────── edit one lender's month ─────────────────────────────
 
@@ -44,31 +44,91 @@ export type EditRowData = {
   monthLabel: string;
   values: Record<FieldKey, string | null>;
   entered: string[];
-  statementHint: { date: string; amount: string; label: string } | null;
+  /** Card: this month's bill (read from an uploaded statement, typed in, or from the card). */
+  bill: { statementDate: string; dueDate: string; totalDue: string; minimumDue: string; purchases: string; financeCharges: string; source: "upload" | "manual" | "card" } | null;
+  /** Loans / other lenders: the due date you entered, and the automatic one. */
+  dueDate: string;
+  autoDueDate: string | null;
 };
+
+type BillForm = { statementDate: string; dueDate: string; totalDue: string; minimumDue: string; purchases: string; financeCharges: string };
+const BILL_LABELS: Record<keyof BillForm, string> = {
+  statementDate: "Statement date",
+  dueDate: "Payment due date",
+  totalDue: "Total amount due",
+  minimumDue: "Minimum amount due",
+  purchases: "Purchases / spends on the bill",
+  financeCharges: "Interest & charges on the bill",
+};
+
+const num = (v: string | null | undefined) => {
+  const n = Number(String(v ?? "").replace(/[,₹\s]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+};
+const filled = (v: string) => v.trim() !== "";
 
 export function EditEntryDialog({ row }: { row: EditRowData }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [pending, start] = React.useTransition();
+  const isCard = row.kind === "CARD";
   const initial = React.useCallback(
     () => Object.fromEntries((Object.keys(FIELD_LABELS) as FieldKey[]).map((k) => [k, row.entered.includes(k) ? (row.values[k] ?? "") : ""])) as Record<FieldKey, string>,
     [row],
   );
+  const initialBill = React.useCallback(
+    (): BillForm => ({
+      statementDate: row.bill?.statementDate ?? "",
+      dueDate: row.bill?.dueDate ?? "",
+      totalDue: row.bill?.totalDue ?? "",
+      minimumDue: row.bill?.minimumDue ?? "",
+      purchases: row.bill?.purchases ?? "",
+      financeCharges: row.bill?.financeCharges ?? "",
+    }),
+    [row],
+  );
   const [form, setForm] = React.useState<Record<FieldKey, string>>(initial);
+  const [bill, setBill] = React.useState<BillForm>(initialBill);
+  const [billDirty, setBillDirty] = React.useState(false);
+  const [dueDate, setDueDate] = React.useState(row.dueDate);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const fields = (Object.keys(FIELD_LABELS) as FieldKey[]).filter((k) => k !== "remainingEmis" || row.kind === "LOAN" || row.entered.includes("remainingEmis"));
 
-  const save = (values: Record<FieldKey, string>) =>
+  // Live working: what the month will show with the figures typed so far.
+  const value = (k: FieldKey) => (filled(form[k]) ? num(form[k]) : num(row.values[k]));
+  const opening = value("opening");
+  const spends = filled(form.newBorrowing) ? num(form.newBorrowing) : isCard && billDirty && filled(bill.purchases) ? num(bill.purchases) : num(row.values.newBorrowing);
+  const payment = value("payment");
+  let closing: number;
+  let interest: number;
+  const billClosing = isCard && filled(bill.totalDue) && (billDirty || row.bill) ? num(bill.totalDue) : null;
+  if (filled(form.closing) && filled(form.interest)) {
+    closing = num(form.closing);
+    interest = num(form.interest);
+  } else if (filled(form.closing) || billClosing !== null) {
+    closing = filled(form.closing) ? num(form.closing) : billClosing!;
+    interest = closing - opening - spends + payment;
+  } else if (filled(form.interest)) {
+    interest = num(form.interest);
+    closing = opening + spends - payment + interest;
+  } else {
+    interest = num(row.values.interest);
+    closing = opening + spends - payment + interest;
+  }
+  const gap = filled(form.closing) && filled(form.interest) ? closing - (opening + spends - payment + interest) : 0;
+
+  const save = (values: Record<FieldKey, string>, reset = false) =>
     start(async () => {
-      const payload: Record<string, string> = { month: row.month, lenderKey: row.key };
-      for (const k of Object.keys(values) as FieldKey[]) payload[API_FIELD[k]] = values[k].trim();
-      const res = await saveDebtEntryAction(payload);
+      const entry: Record<string, string> = { month: row.month, lenderKey: row.key, dueDate: reset || isCard ? "" : dueDate };
+      for (const k of Object.keys(values) as FieldKey[]) entry[API_FIELD[k]] = values[k].trim();
+      const billPayload = isCard && billDirty && !reset ? { cardId: row.key.slice(5), month: row.month, ...bill } : null;
+      const res = await saveDebtMonthAction(entry, billPayload);
       if (!res.ok) {
         const fe: Record<string, string> = {};
         for (const [k, v] of Object.entries(res.fieldErrors ?? {})) {
           const f = (Object.keys(API_FIELD) as FieldKey[]).find((x) => API_FIELD[x] === k);
-          if (f) fe[f] = v[0];
+          fe[f ?? `bill.${k}`] = v[0];
+          if (k === "dueDate") fe.dueDate = v[0];
         }
         setErrors(fe);
         toast.error(res.error);
@@ -80,11 +140,11 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
     });
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (o) { setForm(initial()); setErrors({}); } }}>
+    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (o) { setForm(initial()); setBill(initialBill()); setBillDirty(false); setDueDate(row.dueDate); setErrors({}); } }}>
       <Button size="icon" variant="ghost" className="size-8" aria-label={`Edit ${row.name} for ${row.monthLabel}`} onClick={() => setOpen(true)}>
         <Pencil />
       </Button>
-      <DialogContent title={`${row.name} · ${row.monthLabel}`} description="Leave a box empty and FinSight360 calculates it from your statements, transactions and loan schedule. Type a figure (e.g. from the lender's statement) to use it instead.">
+      <DialogContent className="sm:max-w-2xl" title={`${row.name} · ${row.monthLabel}`} description="Leave a box empty and FinSight360 calculates it from your statements, transactions and loan schedule. Type a figure (e.g. from the lender's statement) to use it instead.">
         <form
           className="grid gap-4"
           noValidate
@@ -93,16 +153,39 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
             save(form);
           }}
         >
-          {row.statementHint && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
-              <span>
-                {row.statementHint.label} ({row.statementHint.date}): <span className="tabular font-medium">{inr(Number(row.statementHint.amount))}</span>
-              </span>
-              <Button type="button" size="sm" variant="outline" onClick={() => setForm((f) => ({ ...f, closing: row.statementHint!.amount }))}>
-                <Wand2 /> Use as remaining balance
-              </Button>
-            </div>
+          {isCard ? (
+            <fieldset className="grid gap-3 rounded-lg border p-3">
+              <legend className="px-1 text-sm font-medium">Card bill generated this month</legend>
+              <p className="-mt-1 text-xs text-muted-foreground">
+                {row.bill?.source === "upload"
+                  ? "Read from your uploaded card statement — correct any figure if needed."
+                  : row.bill?.source === "manual"
+                    ? "Entered by you. Clear the total due to remove it."
+                    : row.bill?.source === "card"
+                      ? "From the card's details. Saving here keeps it as this month's bill."
+                      : "Upload the card statement PDF and this fills in by itself — or type it from the bill. The total due becomes the remaining balance."}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {(Object.keys(BILL_LABELS) as (keyof BillForm)[]).map((k) => (
+                  <FormField key={k} id={`bill-${k}`} label={BILL_LABELS[k]} error={errors[`bill.${k}`]}>
+                    <Input
+                      id={`bill-${k}`}
+                      type={k === "statementDate" || k === "dueDate" ? "date" : "text"}
+                      inputMode={k === "statementDate" || k === "dueDate" ? undefined : "decimal"}
+                      min={k === "statementDate" ? `${row.month}-01` : undefined}
+                      value={bill[k]}
+                      onChange={(e) => { setBill((b) => ({ ...b, [k]: e.target.value })); setBillDirty(true); }}
+                    />
+                  </FormField>
+                ))}
+              </div>
+            </fieldset>
+          ) : (
+            <FormField id="de-due" label="Payment due date" error={errors.dueDate} hint={dueDate ? "Entered by you" : row.autoDueDate ? `Auto: ${row.autoDueDate} (EMI schedule)` : "Optional"}>
+              <Input id="de-due" type="date" className="sm:max-w-56" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+            </FormField>
           )}
+
           <div className="grid gap-3 sm:grid-cols-2">
             {fields.map((k) => (
               <FormField
@@ -110,7 +193,7 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
                 id={`de-${k}`}
                 label={FIELD_LABELS[k]}
                 error={errors[k]}
-                hint={form[k].trim() === "" ? `Auto: ${row.values[k] === null ? "—" : k === "remainingEmis" ? row.values[k] : inr(Number(row.values[k]))}` : "Entered by you"}
+                hint={filled(form[k]) ? "Entered by you" : `Auto: ${row.values[k] === null ? "—" : k === "remainingEmis" ? row.values[k] : inr(Number(row.values[k]))}`}
               >
                 <Input
                   id={`de-${k}`}
@@ -122,11 +205,20 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
               </FormField>
             ))}
           </div>
-          <p className="text-xs text-muted-foreground">
-            Remaining balance = Total outstanding + New spends − Payment + Interest. If you enter the remaining balance, interest is worked out as the balancing figure. Next month starts from this month&apos;s remaining balance.
-          </p>
+
+          <div className="rounded-lg bg-muted/50 p-3 text-sm" aria-live="polite">
+            <p className="font-medium">This month will show</p>
+            <p className="tabular mt-1 text-xs text-muted-foreground">
+              {inr(opening)} + {inr(spends)} new − {inr(payment)} paid + {inr(interest)} interest =
+            </p>
+            <p className="tabular mt-0.5">
+              Remaining balance <b>{inr(closing)}</b> · Interest & charges <b className={interest < 0 ? "text-amber-700 dark:text-warning" : ""}>{inr(interest)}</b>
+            </p>
+            {interest < 0 && <p className="mt-1 text-xs text-amber-700 dark:text-warning">Interest is negative — check the payment, spends or balance figures.</p>}
+            {Math.abs(gap) >= 0.01 && <p className="mt-1 text-xs text-amber-700 dark:text-warning">Your remaining balance and interest differ by {inr(gap)}.</p>}
+          </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
-            <Button type="button" variant="ghost" disabled={pending || row.entered.length === 0} onClick={() => save(Object.fromEntries(Object.keys(FIELD_LABELS).map((k) => [k, ""])) as Record<FieldKey, string>)}>
+            <Button type="button" variant="ghost" disabled={pending || (row.entered.length === 0 && !row.dueDate)} onClick={() => save(Object.fromEntries(Object.keys(FIELD_LABELS).map((k) => [k, ""])) as Record<FieldKey, string>, true)}>
               <RotateCcw /> Back to automatic
             </Button>
             <div className="flex flex-col-reverse gap-2 sm:flex-row">
