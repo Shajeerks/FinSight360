@@ -152,7 +152,7 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       orderBy: { createdAt: "asc" },
       include: {
         schedule: { select: { id: true, installmentNumber: true, dueDate: true } },
-        payments: { where: { deletedAt: null }, select: { id: true, paymentDate: true, amount: true, interestComponent: true, chargesComponent: true, isOpening: true, scheduleId: true, transactionId: true } },
+        payments: { where: { deletedAt: null }, select: { id: true, paymentDate: true, paymentType: true, amount: true, principalComponent: true, interestComponent: true, chargesComponent: true, isOpening: true, scheduleId: true, transactionId: true } },
       },
     }),
     prisma.debtLender.findMany({ where: { userId, deletedAt: null }, orderBy: { createdAt: "asc" } }),
@@ -337,8 +337,13 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
   for (const loan of loans) {
     const key = `loan:${loan.id}`;
     const matched = (loanMatches.get(loan.id) ?? []).sort((a, b) => a.date.getTime() - b.date.getTime());
+    // "Outstanding as per bank" entered on the loan creates an extra principal entry dated the
+    // day it was entered. It is a correction of the past, not money paid that month: shown as
+    // an adjustment in the month the loan started, never as a payment.
+    const isCorrection = (p: (typeof loan.payments)[number]) => p.isOpening && p.paymentType === "PREPAYMENT";
+    const correction = sum(loan.payments.filter(isCorrection).map((p) => p.principalComponent));
     const paymentsByMonth = new Map<MonthKey, typeof loan.payments>();
-    for (const p of loan.payments) {
+    for (const p of loan.payments.filter((x) => !isCorrection(x))) {
       const k = monthKey(p.paymentDate);
       paymentsByMonth.set(k, [...(paymentsByMonth.get(k) ?? []), p]);
     }
@@ -377,8 +382,11 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       const n: SourceNote[] = [];
       if (paid.length) n.push({ kind: "schedule", text: `${paid.length} payment(s) recorded on the loan${paid.some((p) => p.isOpening) ? " (incl. paid before FinSight360)" : ""}` });
       if (bank.length) n.push({ kind: "bank-match", text: `${bank.length} EMI debit(s) found in your bank statement — interest estimated at ${toDecimal(loan.interestRate).toFixed(2)}% a year until applied to the loan` });
+      const adjustment = m === range[0] && correction.greaterThan(0) ? correction.negated() : ZERO;
+      if (!adjustment.isZero()) n.push({ kind: "schedule", text: `Includes a −₹${correction.toFixed(2)} adjustment so the balance matches the lender's outstanding you entered (principal repaid before FinSight360 — not a payment this month)` });
       notes.set(m, n);
       return {
+        adjustment,
         newBorrowing: m === disbursed ? toDecimal(loan.originalPrincipal) : ZERO,
         payment,
         interest: (opening) => {
@@ -504,7 +512,8 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
         row,
         notes: l.notes.get(selected) ?? [],
         pendingEmis: l.pendingEmis.get(selected) ?? [],
-        bill: l.bills.get(selected) ?? null,
+        // This month's bill, else the earlier bill that falls due this month (e.g. last month's statement).
+        bill: l.bills.get(selected) ?? [...l.bills.values()].find((b) => b.dueDate && monthKey(b.dueDate) === selected) ?? null,
         due: l.dues.get(selected) ?? null,
         entryDueDate: l.dues.get(selected)?.source === "entered" ? l.dues.get(selected)!.dueDate : null,
         rate: effectiveRate(row.interest, row.opening),
@@ -585,6 +594,16 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
     },
     unmatchedEmis: t.unmatchedEmis.filter((e) => monthKey(e.date) === selected),
     loans: t.loans,
+    // Rows from uploaded statements still waiting in the Review Queue don't count until approved.
+    pendingReview: await prisma.transaction.count({
+      where: {
+        userId,
+        deletedAt: null,
+        status: "PENDING_REVIEW",
+        transactionDate: { gte: monthStart(selected), lte: monthEnd(selected) },
+        OR: [{ creditCardId: { not: null } }, { loanId: { not: null } }, { transactionType: { in: ["CARD_PAYMENT", "EMI", "BORROWING"] } }],
+      },
+    }),
     unassignedCardPayments: await prisma.transaction.findMany({
       where: countableWhere(userId, { transactionType: "CARD_PAYMENT", creditCardId: null, transactionDate: { gte: monthStart(selected), lte: monthEnd(selected) } }),
       select: { id: true, transactionDate: true, amount: true, description: true },
@@ -653,10 +672,13 @@ export async function saveCardBill(userId: string, input: unknown, meta: Request
   const from = monthStart(d.month);
   const to = monthEnd(d.month);
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.statement.findFirst({
-      where: { userId, creditCardId: card.id, type: "CREDIT_CARD", deletedAt: null, totalDue: { not: null }, statementDate: { gte: from, lte: to } },
-      orderBy: [{ statementDate: "desc" }, { createdAt: "desc" }],
-    });
+    const billIn = (a: Date, b: Date) =>
+      tx.statement.findFirst({
+        where: { userId, creditCardId: card.id, type: "CREDIT_CARD", deletedAt: null, totalDue: { not: null }, statementDate: { gte: a, lte: b } },
+        orderBy: [{ statementDate: "desc" }, { createdAt: "desc" }],
+      });
+    // The bill being edited (in `month`); a new statement date may move it to another month.
+    let existing = await billIn(from, to);
     if (d.totalDue === null) {
       // Remove the bill typed for this month (an uploaded one stays — undo its import instead).
       if (existing && !existing.importId) {
@@ -673,9 +695,11 @@ export async function saveCardBill(userId: string, input: unknown, meta: Request
       await audit({ userId, action: AuditAction.DEBT_ENTRY_SAVED, entityType: "Statement", entityId: existing?.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { month: d.month, bill: "removed" } }, tx);
       return null;
     }
-    if (d.statementDate < from || d.statementDate > to) {
-      throw new AppError(`The statement date must be in ${d.month}.`, 400, "WRONG_MONTH", { statementDate: ["Pick a date in this month"] });
+    if (d.statementDate > todayInTimezone(DEFAULT_TIMEZONE)) {
+      throw new AppError("The statement date can't be in the future.", 400, "FUTURE_DATE", { statementDate: ["Pick today or an earlier date"] });
     }
+    // Typed a date in another month and nothing to move: correct that month's bill if there is one.
+    if (!existing) existing = await billIn(monthStart(monthKey(d.statementDate)), monthEnd(monthKey(d.statementDate)));
     const dec = (v: string | null) => (v === null ? null : roundMoney(v));
     const data = {
       statementDate: d.statementDate,

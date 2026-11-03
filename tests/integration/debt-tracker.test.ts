@@ -235,7 +235,11 @@ describe("Debt tracker (integration)", () => {
     expect([sep.newBorrowing, sep.interest, sep.closing].map(fixed)).toEqual(["2000.00", "50.00", "2050.00"]);
     expect(l.dues.get("2026-10")!.dueDate?.toISOString().slice(0, 10)).toBe("2026-10-05");
     expect(fixed((await prisma.creditCard.findUniqueOrThrow({ where: { id: cardId } })).totalAmountDue)).toBe("2050.00");
-    await expect(saveCardBill(userId, { cardId, month: "2026-09", statementDate: "2026-08-15", totalDue: "1" }, meta)).rejects.toMatchObject({ code: "WRONG_MONTH" });
+    // From the October row, a past statement date (last month) is accepted and saved as August's bill.
+    await saveCardBill(userId, { cardId, month: "2026-10", statementDate: "2026-08-15", dueDate: "2026-09-04", totalDue: "1500" }, meta);
+    expect((await lender(`card:${cardId}`)).bills.get("2026-08")?.totalDue.toFixed(2)).toBe("1500.00");
+    await saveCardBill(userId, { cardId, month: "2026-08", totalDue: "" }, meta);
+    await expect(saveCardBill(userId, { cardId, month: "2026-09", statementDate: "2099-01-01", totalDue: "1" }, meta)).rejects.toMatchObject({ code: "FUTURE_DATE" });
     await expect(saveCardBill(userId, { cardId, month: "2026-09", statementDate: "2026-09-15", totalDue: "100", minimumDue: "500" }, meta)).rejects.toBeTruthy();
 
     await saveCardBill(userId, { cardId, month: "2026-09", totalDue: "" }, meta);
@@ -255,6 +259,19 @@ describe("Debt tracker (integration)", () => {
     await saveDebtEntry(userId, { month: "2026-10", lenderKey: `lender:${ravi.id}`, dueDate: "2026-10-30" }, meta);
     const r = await lender(`lender:${ravi.id}`);
     expect([r.dues.get("2026-10")!.dueDate?.toISOString().slice(0, 10), r.dues.get("2026-10")!.source, r.dues.get("2026-10")!.status]).toEqual(["2026-10-30", "entered", "OVERDUE"]);
+  });
+
+  it("'outstanding as per bank' on a loan is an adjustment in the first month, not a payment this month", async () => {
+    const loan = await createLoan(userId, { name: "Home", lender: "SBI", loanType: "HOME", principal: "500000", interestRate: "9", startDate: "2025-01-01", firstEmiDate: "2025-02-05", tenureMonths: 120, emisPaid: 3, outstandingAsPerBank: "400000" }, meta);
+    const correction = await prisma.loanPayment.findFirstOrThrow({ where: { loanId: loan.id, isOpening: true, paymentType: "PREPAYMENT" } });
+    expect(correction.principalComponent.greaterThan(0)).toBe(true);
+    const l = await lender(`loan:${loan.id}`);
+    const now = l.months[l.months.length - 1];
+    expect(fixed(month(l, "2025-01").adjustment)).toBe(fixed(correction.principalComponent.negated()));
+    // No month shows the correction as money paid
+    expect(l.months.every((r) => r.payment.lessThan(correction.principalComponent))).toBe(true);
+    // Paid till date still includes the principal repaid
+    expect(Number(now.paidToDate)).toBeGreaterThan(Number(correction.principalComponent));
   });
 
   it("another user can't see or edit your lenders", async () => {

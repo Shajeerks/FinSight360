@@ -121,7 +121,9 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
     start(async () => {
       const entry: Record<string, string> = { month: row.month, lenderKey: row.key, dueDate: reset || isCard ? "" : dueDate };
       for (const k of Object.keys(values) as FieldKey[]) entry[API_FIELD[k]] = values[k].trim();
-      const billPayload = isCard && billDirty && !reset ? { cardId: row.key.slice(5), month: row.month, ...bill } : null;
+      // The bill keeps its own month (a statement from last month stays last month's bill).
+      const billMonth = row.bill?.statementDate ? row.bill.statementDate.slice(0, 7) : row.month;
+      const billPayload = isCard && billDirty && !reset ? { cardId: row.key.slice(5), month: billMonth, ...bill } : null;
       const res = await saveDebtMonthAction(entry, billPayload);
       if (!res.ok) {
         const fe: Record<string, string> = {};
@@ -155,7 +157,7 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
         >
           {isCard ? (
             <fieldset className="grid gap-3 rounded-lg border p-3">
-              <legend className="px-1 text-sm font-medium">Card bill generated this month</legend>
+              <legend className="px-1 text-sm font-medium">{row.bill && row.bill.statementDate.slice(0, 7) !== row.month ? "Card bill due this month (last statement)" : "Card bill (statement)"}</legend>
               <p className="-mt-1 text-xs text-muted-foreground">
                 {row.bill?.source === "upload"
                   ? "Read from your uploaded card statement — correct any figure if needed."
@@ -163,7 +165,7 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
                     ? "Entered by you. Clear the total due to remove it."
                     : row.bill?.source === "card"
                       ? "From the card's details. Saving here keeps it as this month's bill."
-                      : "Upload the card statement PDF and this fills in by itself — or type it from the bill. The total due becomes the remaining balance."}
+                      : "Upload the card statement PDF and this fills in by itself — or type it from the bill (any past statement date). The total due becomes the remaining balance of the statement's month."}
               </p>
               <div className="grid gap-3 sm:grid-cols-3">
                 {(Object.keys(BILL_LABELS) as (keyof BillForm)[]).map((k) => (
@@ -172,7 +174,7 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
                       id={`bill-${k}`}
                       type={k === "statementDate" || k === "dueDate" ? "date" : "text"}
                       inputMode={k === "statementDate" || k === "dueDate" ? undefined : "decimal"}
-                      min={k === "statementDate" ? `${row.month}-01` : undefined}
+                      max={k === "statementDate" ? new Date().toISOString().slice(0, 10) : undefined}
                       value={bill[k]}
                       onChange={(e) => { setBill((b) => ({ ...b, [k]: e.target.value })); setBillDirty(true); }}
                     />

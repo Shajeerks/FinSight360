@@ -29,6 +29,11 @@ export type AutoMonth = {
   /** A closing figure the source knows for certain (e.g. from a statement) — else null. */
   closing?: Decimal | null;
   remainingEmis: number | null;
+  /**
+   * A correction that isn't a payment, e.g. principal repaid before the loan was tracked here
+   * (to match the lender's outstanding). Negative reduces the balance. Counted in "paid by this month".
+   */
+  adjustment?: Decimal;
 };
 
 /** Figures entered by hand / from Excel. null = calculate. */
@@ -55,6 +60,8 @@ export type DebtMonthRow = {
   remainingEmis: number | null;
   /** Closing − last month's closing (negative = debt went down). */
   changeFromLastMonth: Decimal;
+  /** Correction applied this month that is not a payment (see AutoMonth.adjustment). */
+  adjustment: Decimal;
   /** Fields that were entered by hand / imported (shown with a marker, editable). */
   entered: DebtField[];
   /** When both closing and interest were entered and they don't add up: the gap. */
@@ -121,31 +128,32 @@ export function buildLenderMonths(
     let interest: Decimal;
     let closing: Decimal;
     let unreconciled = new Decimal(0);
+    const adj = roundMoney(a.adjustment ?? 0);
     const enteredClosing = has(o.closingOutstanding) ? roundMoney(o.closingOutstanding) : null;
     const enteredInterest = has(o.interest) ? roundMoney(o.interest) : null;
     if (enteredClosing && enteredInterest) {
       closing = enteredClosing;
       interest = enteredInterest;
       entered.push("closing", "interest");
-      unreconciled = roundMoney(closing.minus(opening.plus(newBorrowing).minus(payment).plus(interest)));
+      unreconciled = roundMoney(closing.minus(opening.plus(newBorrowing).minus(payment).plus(interest).plus(adj)));
     } else if (enteredClosing) {
       closing = enteredClosing;
       entered.push("closing");
-      interest = roundMoney(closing.minus(opening).minus(newBorrowing).plus(payment));
+      interest = roundMoney(closing.minus(opening).minus(newBorrowing).plus(payment).minus(adj));
     } else if (enteredInterest) {
       interest = enteredInterest;
       entered.push("interest");
-      closing = roundMoney(opening.plus(newBorrowing).minus(payment).plus(interest));
+      closing = roundMoney(opening.plus(newBorrowing).minus(payment).plus(interest).plus(adj));
     } else if (a.closing) {
       // A figure from the lender's own statement beats our estimate of interest.
       closing = roundMoney(a.closing);
-      interest = roundMoney(closing.minus(opening).minus(newBorrowing).plus(payment));
+      interest = roundMoney(closing.minus(opening).minus(newBorrowing).plus(payment).minus(adj));
     } else {
       interest = roundMoney(a.interest(opening));
-      closing = roundMoney(opening.plus(newBorrowing).minus(payment).plus(interest));
+      closing = roundMoney(opening.plus(newBorrowing).minus(payment).plus(interest).plus(adj));
     }
 
-    const paidToDate = pick("paidToDate", o.paidToDate, () => (prev ? prev.paidToDate : toDecimal(paidBefore)).plus(payment));
+    const paidToDate = pick("paidToDate", o.paidToDate, () => (prev ? prev.paidToDate : toDecimal(paidBefore)).plus(payment).minus(Decimal.min(adj, 0)));
     let remainingEmis = a.remainingEmis;
     if (o.remainingEmis !== null && o.remainingEmis !== undefined) {
       remainingEmis = o.remainingEmis;
@@ -161,6 +169,7 @@ export function buildLenderMonths(
       closing,
       remainingEmis,
       changeFromLastMonth: roundMoney(closing.minus(prev ? prev.closing : opening)),
+      adjustment: adj,
       entered,
       unreconciled,
     };

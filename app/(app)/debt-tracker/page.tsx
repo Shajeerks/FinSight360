@@ -87,6 +87,7 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
   const t = d.totals;
   const principalPaid = Decimal.max(t.payment.minus(t.interest), 0);
   const pending = d.rows.flatMap((r) => r.pendingEmis.map((e) => ({ ...e, loanId: r.key.slice(5), lender: r.name })));
+  const paidRows = d.rows.filter((r) => r.row.payment.greaterThan(0)).sort((a, b) => b.row.payment.comparedTo(a.row.payment));
   // Payments falling due in the selected month, earliest first.
   const dues = d.rows
     .filter((r) => r.due?.dueDate && r.due.dueDate.toISOString().slice(0, 7) === d.month && r.due.status !== "NO_DUE")
@@ -166,6 +167,35 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
             />
             <StatCard title={`Interest in ${d.fy.label}`} value={m0(d.fy.interest)} icon={CalendarRange} sub={`Paid ${m0(d.fy.payment)} since April`} />
           </section>
+
+          {d.pendingReview > 0 && (
+            <Card className="border-amber-500/40">
+              <CardContent className="flex flex-col gap-2 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+                <p className="flex items-center gap-2"><AlertTriangle className="size-4 shrink-0 text-amber-600" /> {d.pendingReview} card / loan transaction(s) from {label} are waiting in the Review Queue and aren&apos;t counted here yet.</p>
+                <Link href="/imports/review" className="shrink-0 font-medium text-primary hover:underline">Review them →</Link>
+              </CardContent>
+            </Card>
+          )}
+
+          {paidRows.length > 0 && (
+            <details className="group rounded-xl border bg-card px-4 py-3 text-sm">
+              <summary className="cursor-pointer select-none font-medium marker:text-muted-foreground">
+                What makes up the {m0(t.payment)} paid in {monthLabel(sel, "short")}?
+              </summary>
+              <ul className="mt-2 divide-y">
+                {paidRows.map((r) => (
+                  <li key={r.key} className="flex items-start justify-between gap-3 py-1.5">
+                    <div className="min-w-0">
+                      <p className="truncate">{r.name}{r.row.entered.includes("payment") && <span className="ml-1 text-[10px] text-primary">● entered</span>}</p>
+                      <p className="text-xs text-muted-foreground">{r.notes.map((n) => n.text).join(" · ") || KIND_LABEL[r.kind]}</p>
+                    </div>
+                    <span className="tabular shrink-0 font-medium">{m2(r.row.payment)}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-xs text-muted-foreground">If a figure is wrong, tap ✎ on that lender&apos;s row and type the correct payment — the totals above update straight away.</p>
+            </details>
+          )}
 
           {dues.length > 0 && (
             <Card>

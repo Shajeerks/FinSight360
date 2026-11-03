@@ -58,10 +58,20 @@ export function merchantFor(type: TransactionType, description: string): string 
 
 /** "HDFC CC PAYMENT XX1043" → the user's card ending 1043 (only when exactly one matches). */
 export async function resolvePaidCard(db: Db, userId: string, description: string): Promise<{ id: string; exact: boolean } | null> {
-  const cards = await db.creditCard.findMany({ where: { userId, deletedAt: null }, select: { id: true, last4: true } });
+  const cards = await db.creditCard.findMany({ where: { userId, deletedAt: null }, select: { id: true, last4: true, bankName: true, cardName: true } });
   const digits = new Set(description.match(/\d{4}(?!\d)/g) ?? []);
   const hits = cards.filter((c) => c.last4 && digits.has(c.last4));
   if (hits.length === 1) return { id: hits[0].id, exact: true };
+  // The card's bank named in the narration ("HDFC CREDIT CARD", "SBI CARD", "AMEX") — a guess to confirm.
+  const d = ` ${description.toUpperCase().replace(/[^A-Z0-9]+/g, " ")} `;
+  const STOP = new Set(["BANK", "CARD", "CARDS", "CREDIT", "LTD", "LIMITED", "OF", "THE", "INDIA", "FIRST", "SMALL", "FINANCE"]);
+  const ALIAS: Record<string, string[]> = { "AMERICAN EXPRESS": ["AMEX"], "STATE BANK OF INDIA": ["SBI"], "SBI CARD": ["SBI"], "KOTAK MAHINDRA BANK": ["KOTAK"] };
+  const byBank = cards.filter((c) => {
+    const bank = c.bankName.toUpperCase();
+    const words = [...bank.split(/[^A-Z0-9]+/).filter((w) => w.length >= 3 && !STOP.has(w)), ...(ALIAS[bank] ?? [])];
+    return words.some((w) => d.includes(` ${w} `));
+  });
+  if (byBank.length === 1) return { id: byBank[0].id, exact: false };
   // Only one card on file → probably that one, but let the user confirm.
   return cards.length === 1 ? { id: cards[0].id, exact: false } : null;
 }
