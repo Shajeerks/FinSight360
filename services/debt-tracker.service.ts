@@ -14,11 +14,13 @@ import {
   financialYearOf,
   fyLabel,
   isEmptyRow,
+  isIdleSettledRow,
   monthEnd,
   monthKey,
   monthStart,
   monthsBetween,
   nextMonth,
+  settlementOf,
   type AutoMonth,
   type DebtMonthRow,
   type MonthKey,
@@ -486,8 +488,38 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
     .filter((t) => !claimed.has(t.id) && !t.loanId && t.transactionType === "EMI")
     .map((t) => ({ transactionId: t.id, date: t.transactionDate, amount: toDecimal(t.amount), description: t.description, account: t.bankAccount?.nickname ?? t.cashAccount?.name ?? null }));
 
-  return { current, firstMonth, lenders: out, unmatchedEmis, loans: loans.filter((l) => l.status === "ACTIVE").map((l) => ({ id: l.id, label: `${l.lender} — ${l.name}`, emi: toDecimal(l.emiAmount) })) };
+  // Closed loans, zero-balance cards and repaid lenders (worked out from the same monthly rows).
+  const loanStatus = new Map(loans.map((l) => [`loan:${l.id}`, l.status]));
+  const cardStatus = new Map(cards.map((c) => [`card:${c.id}`, c.status]));
+  const closedLenders = out
+    .map((l) => {
+      const s = settlementOf(l.months, { explicitlyClosed: l.closed, zeroCountsAsSettled: l.kind === "CARD" });
+      if (!s.settled) return null;
+      const ls = loanStatus.get(l.key);
+      const status: ClosedStatus =
+        ls === "FORECLOSED" ? "FORECLOSED"
+        : ls === "CLOSED" ? "CLOSED"
+        : cardStatus.get(l.key) === "CLOSED" ? "CARD_CLOSED"
+        : l.kind === "CARD" ? (s.hadDebt ? "PAID_OFF" : "NO_BALANCE")
+        : l.closed ? "REPAID"
+        : "PAID_OFF";
+      return { key: l.key, name: l.name, kind: l.kind, detail: l.detail, href: l.href, status, ...s };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+    .sort((a, b) => (b.closedMonth ?? "").localeCompare(a.closedMonth ?? "") || a.name.localeCompare(b.name));
+
+  return {
+    current,
+    firstMonth,
+    lenders: out,
+    closedLenders,
+    unmatchedEmis,
+    loans: loans.filter((l) => l.status === "ACTIVE").map((l) => ({ id: l.id, label: `${l.lender} — ${l.name}`, emi: toDecimal(l.emiAmount) })),
+  };
 }
+
+/** Why a lender is on the "Closed & paid off" tab. */
+export type ClosedStatus = "CLOSED" | "FORECLOSED" | "CARD_CLOSED" | "REPAID" | "PAID_OFF" | "NO_BALANCE";
 
 export type DebtTracker = Awaited<ReturnType<typeof buildDebtTracker>>;
 
@@ -497,12 +529,17 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
   const m = month && monthParam.safeParse(month).success ? (month > t.current ? t.current : month) : t.current;
   const selected = m < t.firstMonth ? t.firstMonth : m;
   const prevKey = nextMonth(selected, -1);
+  const settledKeys = new Set(t.closedLenders.map((c) => c.key));
 
   const rows = t.lenders
     .map((l) => {
       const row = l.months.find((r) => r.month === selected);
       if (!row || isEmptyRow(row)) return null;
+      const settled = settledKeys.has(l.key);
       return {
+        settled,
+        /** Paid off and nothing happened this month: shown on the Closed tab instead of the sheet. */
+        idle: settled && isIdleSettledRow(row),
         key: l.key,
         name: l.name,
         kind: l.kind,
@@ -594,6 +631,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
     },
     unmatchedEmis: t.unmatchedEmis.filter((e) => monthKey(e.date) === selected),
     loans: t.loans,
+    closedLenders: t.closedLenders,
     // Rows from uploaded statements still waiting in the Review Queue don't count until approved.
     pendingReview: await prisma.transaction.count({
       where: {

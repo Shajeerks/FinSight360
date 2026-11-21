@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { AlertTriangle, Banknote, CalendarRange, Info, Landmark, Percent, Scale, TrendingDown, TrendingUp } from "lucide-react";
+import { AlertTriangle, Banknote, CalendarRange, CheckCircle2, Info, Landmark, Percent, Scale, TrendingDown, TrendingUp } from "lucide-react";
 import { requireUser } from "@/lib/auth/session";
 import { resolvePageMonth } from "@/lib/page-month";
 import { Decimal, formatMoney } from "@/lib/money";
 import { formatDate, formatYearMonth, monthLabel, parseYearMonth } from "@/lib/dates";
-import { getDebtTrackerMonth, listDebtLenders, type DueInfo, type DueStatus } from "@/services/debt-tracker.service";
+import { getDebtTrackerMonth, listDebtLenders, type ClosedStatus, type DueInfo, type DueStatus, type DebtTrackerMonth } from "@/services/debt-tracker.service";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -63,6 +63,136 @@ function DueCell({ due }: { due: DueInfo | null }) {
   );
 }
 
+const CLOSED_BADGE: Record<ClosedStatus, string> = {
+  CLOSED: "Closed",
+  FORECLOSED: "Foreclosed",
+  CARD_CLOSED: "Card closed",
+  REPAID: "Repaid",
+  PAID_OFF: "Paid off",
+  NO_BALANCE: "No balance",
+};
+const closedBadge = (c: { status: ClosedStatus; kind: string }) => (c.status === "PAID_OFF" && c.kind === "CARD" ? "Zero balance" : CLOSED_BADGE[c.status]);
+const shortMonth = (k: string | null) => (k ? monthLabel(parseYearMonth(k)!, "short") : "—");
+
+function ViewTabs({ view, month, closedCount, activeCount }: { view: "active" | "closed"; month: string; closedCount: number; activeCount: number }) {
+  const tab = (key: "active" | "closed", href: string, text: string, count: number) => (
+    <Link
+      href={href}
+      scroll={false}
+      aria-current={view === key ? "page" : undefined}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+        view === key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {text}
+      <span className="tabular rounded-full bg-muted px-1.5 text-[11px] text-muted-foreground">{count}</span>
+    </Link>
+  );
+  return (
+    <nav aria-label="Debt tracker view" className="inline-flex rounded-lg bg-muted p-1">
+      {tab("active", `/debt-tracker?month=${month}`, "Active", activeCount)}
+      {tab("closed", `/debt-tracker?month=${month}&view=closed`, "Closed & paid off", closedCount)}
+    </nav>
+  );
+}
+
+function ClosedDebts({ items }: { items: DebtTrackerMonth["closedLenders"] }) {
+  if (items.length === 0) {
+    return (
+      <EmptyState
+        icon={CheckCircle2}
+        title="No closed loans or zero-balance cards yet"
+        description="When a loan is closed or foreclosed, a card's balance reaches zero, or a lender is fully repaid in the Debt Tracker, it moves here automatically."
+      />
+    );
+  }
+  const loans = items.filter((c) => c.kind === "LOAN").length;
+  const cards = items.filter((c) => c.kind === "CARD").length;
+  const others = items.length - loans - cards;
+  const paidOff = items.filter((c) => c.hadDebt);
+  const interest = paidOff.reduce((a, c) => a.plus(c.totalInterest), new Decimal(0));
+  const paid = paidOff.reduce((a, c) => a.plus(c.totalPaid), new Decimal(0));
+  return (
+    <>
+      <section className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4" aria-label="Closed summary">
+        <StatCard title="Loans closed" value={String(loans)} icon={CheckCircle2} tone="primary" />
+        <StatCard title="Cards at zero" value={String(cards)} icon={Landmark} sub={others ? `+ ${others} other lender(s) repaid` : undefined} />
+        <StatCard title="Paid on these" value={m0(paid)} icon={Banknote} sub="While tracked in FinSight360" />
+        <StatCard title="Interest & charges paid" value={m0(interest)} icon={Percent} />
+      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Closed loans &amp; zero-balance cards</CardTitle>
+          <CardDescription>
+            Worked out from the Debt Tracker: a loan marked closed or foreclosed, a card whose balance is zero, or any lender whose remaining balance has reached zero (within ₹1). They leave the monthly sheet once nothing more happens on them, and come back automatically if you borrow or spend again.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="px-0 sm:px-6">
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[860px] text-sm">
+              <thead>
+                <tr className="border-b text-left text-xs text-muted-foreground">
+                  <th className="px-3 py-2 font-medium">Lender</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Closed in</th>
+                  <th className="px-3 py-2 font-medium">Tracked from</th>
+                  <th className="px-3 py-2 font-medium">Last payment</th>
+                  <th className="px-3 py-2 text-right font-medium">Total paid</th>
+                  <th className="px-3 py-2 text-right font-medium">Interest &amp; charges</th>
+                  <th className="px-3 py-2 text-right font-medium">Balance now</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((c) => (
+                  <tr key={c.key} className="border-b align-top last:border-0 hover:bg-muted/30">
+                    <td className="max-w-64 px-3 py-2.5">
+                      <div className="flex items-center gap-1.5">
+                        {c.href ? <Link href={c.href} className="truncate font-medium hover:underline">{c.name}</Link> : <span className="truncate font-medium">{c.name}</span>}
+                        <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">{KIND_LABEL[c.kind]}</Badge>
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">{c.detail}</p>
+                    </td>
+                    <td className="px-3 py-2.5"><Badge variant="success">{closedBadge(c)}</Badge></td>
+                    <td className="whitespace-nowrap px-3 py-2.5">{shortMonth(c.closedMonth)}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-muted-foreground">{shortMonth(c.firstMonth)}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-muted-foreground">{shortMonth(c.lastPaymentMonth)}</td>
+                    <td className="tabular whitespace-nowrap px-3 py-2.5 text-right">{m2(c.totalPaid)}</td>
+                    <td className="tabular whitespace-nowrap px-3 py-2.5 text-right">{m2(c.totalInterest)}</td>
+                    <td className="tabular whitespace-nowrap px-3 py-2.5 text-right font-semibold">{m2(c.finalBalance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ul className="divide-y md:hidden">
+            {items.map((c) => (
+              <li key={c.key} className="space-y-1.5 px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">
+                      {c.href ? <Link href={c.href} className="hover:underline">{c.name}</Link> : c.name}{" "}
+                      <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{KIND_LABEL[c.kind]}</Badge>
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">{c.detail}</p>
+                  </div>
+                  <Badge variant="success" className="shrink-0">{closedBadge(c)}</Badge>
+                </div>
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                  <div className="flex justify-between gap-2"><dt className="text-muted-foreground">Closed in</dt><dd>{shortMonth(c.closedMonth)}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-muted-foreground">Tracked from</dt><dd>{shortMonth(c.firstMonth)}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-muted-foreground">Total paid</dt><dd className="tabular">{m2(c.totalPaid)}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-muted-foreground">Interest</dt><dd className="tabular">{m2(c.totalInterest)}</dd></div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
 function Cell({ value, entered, strong }: { value: Decimal | number | null; entered?: boolean; strong?: boolean }) {
   return (
     <td className={cn("tabular whitespace-nowrap px-3 py-2.5 text-right", strong && "font-semibold")}>
@@ -81,6 +211,10 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
     listDebtLenders(user.id),
     prisma.debtMonthEntry.count({ where: { userId: user.id, source: "EXCEL" } }),
   ]);
+  const view: "active" | "closed" = sp.view === "closed" ? "closed" : "active";
+  // Paid-off lenders with nothing happening this month live on the Closed tab, not the sheet.
+  const sheetRows = d.rows.filter((r) => !r.idle);
+  const closedLabel = new Map(d.closedLenders.map((c) => [c.key, closedBadge(c)]));
   const sel = parseYearMonth(d.month)!;
   const now = parseYearMonth(d.current)!;
   const label = monthLabel(sel);
@@ -129,7 +263,7 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
 
   const actions = (
     <>
-      <MonthSwitcher month={sel} current={now} basePath="/debt-tracker" />
+      {view === "active" && <MonthSwitcher month={sel} current={now} basePath="/debt-tracker" />}
       <ExcelImportDialog />
       <LenderDialog />
     </>
@@ -139,7 +273,11 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
     <div className="space-y-6">
       <PageHeader title="Debt Tracker" description="Every card, loan and lender month by month — payments, interest and what's left, worked out from your statements." actions={actions} />
 
-      {d.rows.length === 0 ? (
+      <ViewTabs view={view} month={d.month} closedCount={d.closedLenders.length} activeCount={sheetRows.length} />
+
+      {view === "closed" ? (
+        <ClosedDebts items={d.closedLenders} />
+      ) : d.rows.length === 0 ? (
         <EmptyState
           icon={Scale}
           title={`Nothing owed in ${label}`}
@@ -276,6 +414,12 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
               <div>
                 <CardTitle>{label} — lender-wise sheet</CardTitle>
                 <CardDescription>Remaining balance = Total outstanding + New spends − Payment + Interest. Tap ✎ to type a figure from the lender&apos;s statement; <span className="text-primary">●</span> marks figures you entered.</CardDescription>
+                {sheetRows.length < d.rows.length && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {d.rows.length - sheetRows.length} paid-off lender(s) with nothing this month are on the{" "}
+                    <Link href={`/debt-tracker?month=${d.month}&view=closed`} className="font-medium text-primary hover:underline">Closed &amp; paid off</Link> tab.
+                  </p>
+                )}
               </div>
               {excelCount > 0 && <UndoExcelButton />}
             </CardHeader>
@@ -300,13 +444,14 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
                     </tr>
                   </thead>
                   <tbody>
-                    {d.rows.map((r, i) => (
+                    {sheetRows.map((r, i) => (
                       <tr key={r.key} className="border-b align-top last:border-0 hover:bg-muted/30">
                         <td className="px-3 py-2.5 text-muted-foreground">{i + 1}</td>
                         <td className="max-w-56 px-3 py-2.5">
                           <div className="flex items-center gap-1.5">
                             {r.href ? <Link href={r.href} className="truncate font-medium hover:underline">{r.name}</Link> : <span className="truncate font-medium">{r.name}</span>}
                             <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">{KIND_LABEL[r.kind]}</Badge>
+                            {r.settled && <Badge variant="success" className="shrink-0 px-1.5 py-0 text-[10px]">{closedLabel.get(r.key)}</Badge>}
                           </div>
                           <p className="truncate text-xs text-muted-foreground">{r.detail}</p>
                           {r.notes.map((n) => <p key={n.text} className="text-[11px] leading-snug text-muted-foreground">{n.text}</p>)}
@@ -331,7 +476,7 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
                   </tbody>
                   <tfoot>
                     <tr className="border-t-2 bg-muted/40 font-semibold">
-                      <td className="px-3 py-2.5" colSpan={3}>Total ({d.rows.length})</td>
+                      <td className="px-3 py-2.5" colSpan={3}>Total ({sheetRows.length})</td>
                       <Cell value={t.opening} />
                       <Cell value={t.newBorrowing} />
                       <Cell value={t.payment} />
@@ -348,11 +493,11 @@ export default async function DebtTrackerPage(props: PageProps<"/debt-tracker">)
 
               {/* Phones: one card per lender */}
               <ul className="divide-y md:hidden">
-                {d.rows.map((r, i) => (
+                {sheetRows.map((r, i) => (
                   <li key={r.key} className="space-y-2 px-4 py-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <p className="truncate font-medium">{i + 1}. {r.name} <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{KIND_LABEL[r.kind]}</Badge></p>
+                        <p className="truncate font-medium">{i + 1}. {r.name} <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{KIND_LABEL[r.kind]}</Badge>{r.settled && <> <Badge variant="success" className="px-1.5 py-0 text-[10px]">{closedLabel.get(r.key)}</Badge></>}</p>
                         <p className="truncate text-xs text-muted-foreground">{r.detail}</p>
                         {r.due?.dueDate && (
                           <p className="mt-0.5 flex items-center gap-1.5 text-xs">

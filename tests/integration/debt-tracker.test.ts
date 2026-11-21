@@ -279,4 +279,32 @@ describe("Debt tracker (integration)", () => {
     await expect(saveDebtEntry(other, { month: "2026-09", lenderKey: `card:${cardId}`, payment: "5" }, meta)).rejects.toMatchObject({ status: 404 });
     expect((await buildDebtTracker(other)).lenders).toEqual([]);
   });
+  it("closed tab: a card paid back to zero and a closed loan move off the monthly sheet; an active debt stays", async () => {
+    await createTransaction(userId, { kind: "EXPENSE", transactionDate: "2026-08-05", amount: "4000", account: `card:${cardId}`, description: "Amazon" }, meta);
+    await createTransaction(userId, { kind: "CARD_PAYMENT", transactionDate: "2026-09-03", amount: "4000", account: `bank:${bankId}`, creditCardId: cardId, description: "ICICI card bill" }, meta);
+    const open = await createLoan(userId, { name: "Car loan", lender: "SBI", loanType: "CAR", principal: "200000", interestRate: "9", startDate: "2026-07-01", firstEmiDate: "2026-08-05", tenureMonths: 24 }, meta);
+    const done = await createLoan(userId, { name: "Gold loan", lender: "Muthoot", loanType: "OTHER", principal: "50000", interestRate: "10", startDate: "2026-07-01", firstEmiDate: "2026-08-05", tenureMonths: 6 }, meta);
+    await prisma.loan.update({ where: { id: done.id }, data: { status: "CLOSED", closureDate: new Date("2026-09-20") } });
+
+    const t = await buildDebtTracker(userId);
+    const closed = new Map(t.closedLenders.map((c) => [c.key, c]));
+    expect(closed.get(`card:${cardId}`)?.status).toBe("PAID_OFF");
+    expect(closed.get(`card:${cardId}`)?.closedMonth).toBe("2026-09");
+    expect(fixed(closed.get(`card:${cardId}`)!.totalPaid)).toBe("4000.00");
+    expect(closed.get(`loan:${done.id}`)?.status).toBe("CLOSED");
+    expect(closed.has(`loan:${open.id}`)).toBe(false);
+
+    // In the month it was paid off the card is still on the sheet (marked paid off); afterwards it is idle.
+    const sep = await getDebtTrackerMonth(userId, "2026-09");
+    const sepCard = sep.rows.find((r) => r.key === `card:${cardId}`)!;
+    expect([sepCard.settled, sepCard.idle]).toEqual([true, false]);
+    const later = await getDebtTrackerMonth(userId, t.current);
+    expect(later.rows.find((r) => r.key === `card:${cardId}`)?.idle ?? true).toBe(true);
+    expect(later.rows.find((r) => r.key === `loan:${open.id}`)?.idle).toBe(false);
+    expect(later.closedLenders.length).toBe(t.closedLenders.length);
+
+    // Spending on the card again brings it back.
+    await createTransaction(userId, { kind: "EXPENSE", transactionDate: t.current + "-01", amount: "250", account: `card:${cardId}`, description: "Swiggy" }, meta);
+    expect((await buildDebtTracker(userId)).closedLenders.some((c) => c.key === `card:${cardId}`)).toBe(false);
+  });
 });

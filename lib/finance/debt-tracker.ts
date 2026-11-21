@@ -201,3 +201,67 @@ export function financialYearOf(key: MonthKey): number {
 export function fyLabel(startYear: number): string {
   return `FY ${startYear}-${String((startYear + 1) % 100).padStart(2, "0")}`;
 }
+
+// ─────────────────────────── closed loans & zero-balance cards ───────────────────────────
+
+/** Balances within ₹1 of zero count as fully paid (rounding left over by lenders). */
+export const SETTLED_TOLERANCE = new Decimal(1);
+
+export type Settlement = {
+  /** Nothing left to pay (or the card / loan / lender is marked closed). */
+  settled: boolean;
+  /** There was something owed at some point in the tracked months. */
+  hadDebt: boolean;
+  /** First month the balance stayed at zero after the last month something was owed. */
+  closedMonth: MonthKey | null;
+  /** First month with any activity, and the last month a payment was made. */
+  firstMonth: MonthKey | null;
+  lastPaymentMonth: MonthKey | null;
+  totalPaid: Decimal;
+  totalInterest: Decimal;
+  totalBorrowed: Decimal;
+  /** Remaining balance in the latest month (≈ 0 when settled by balance). */
+  finalBalance: Decimal;
+};
+
+const owes = (v: Decimal) => v.greaterThan(SETTLED_TOLERANCE);
+
+/**
+ * Works out from a lender's month rows (oldest first) whether it is paid off.
+ * - explicitlyClosed: the loan is CLOSED / FORECLOSED, the card is CLOSED or the lender is marked repaid.
+ * - zeroCountsAsSettled: a credit card with no balance is "settled" even if it was never used.
+ */
+export function settlementOf(rows: DebtMonthRow[], opts: { explicitlyClosed: boolean; zeroCountsAsSettled?: boolean }): Settlement {
+  const active = rows.filter((r) => !isEmptyRow(r));
+  const last = rows[rows.length - 1];
+  const finalBalance = last ? last.closing : new Decimal(0);
+  const hadDebt = active.some((r) => owes(r.opening) || owes(r.closing) || owes(r.newBorrowing));
+  const finalZero = !owes(finalBalance.abs());
+  const settled = opts.explicitlyClosed || (finalZero && (hadDebt || Boolean(opts.zeroCountsAsSettled)));
+
+  let closedMonth: MonthKey | null = null;
+  if (settled && hadDebt && finalZero) {
+    let lastOwed = -1;
+    rows.forEach((r, i) => {
+      if (owes(r.closing)) lastOwed = i;
+    });
+    closedMonth = rows[lastOwed + 1]?.month ?? null;
+  }
+  const paidRows = active.filter((r) => r.payment.greaterThan(0));
+  return {
+    settled,
+    hadDebt,
+    closedMonth,
+    firstMonth: active[0]?.month ?? null,
+    lastPaymentMonth: paidRows[paidRows.length - 1]?.month ?? null,
+    totalPaid: roundMoney(active.reduce((a, r) => a.plus(r.payment), new Decimal(0))),
+    totalInterest: roundMoney(active.reduce((a, r) => a.plus(r.interest), new Decimal(0))),
+    totalBorrowed: roundMoney(active.reduce((a, r) => a.plus(r.newBorrowing), new Decimal(0))),
+    finalBalance,
+  };
+}
+
+/** A settled lender's row with nothing happening this month — kept out of the active sheet. */
+export function isIdleSettledRow(r: DebtMonthRow): boolean {
+  return !owes(r.opening.abs()) && !owes(r.closing.abs()) && r.payment.isZero() && r.newBorrowing.isZero() && r.interest.isZero();
+}

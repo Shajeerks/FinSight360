@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Decimal } from "@/lib/money";
-import { buildLenderMonths, effectiveRate, financialYearOf, fyLabel, monthsBetween, nextMonth, type AutoMonth } from "@/lib/finance/debt-tracker";
+import { buildLenderMonths, effectiveRate, financialYearOf, fyLabel, isIdleSettledRow, monthsBetween, nextMonth, settlementOf, type AutoMonth } from "@/lib/finance/debt-tracker";
 import { excelMoney, excelMonth } from "@/lib/import/debt-excel";
 
 const d = (v: string | number) => new Decimal(v);
@@ -62,5 +62,46 @@ describe("debt tracker: helpers", () => {
     expect(excelMonth("10/2026")).toBe("2026-10");
     expect(excelMonth(new Date(Date.UTC(2026, 9, 1)))).toBe("2026-10");
     expect(excelMonth("Sheet1")).toBeNull();
+  });
+});
+
+describe("debt tracker: closed loans and zero-balance cards", () => {
+  const months = ["2026-07", "2026-08", "2026-09", "2026-10"];
+  const pay = (byMonth: Record<string, number>) => (m: string) => flat(byMonth[m] ?? 0);
+
+  it("a loan paid down to zero is settled in the month the balance reached zero", () => {
+    const rows = buildLenderMonths(months, "2000", "0", pay({ "2026-07": 1000, "2026-08": 1000 }));
+    const s = settlementOf(rows, { explicitlyClosed: false });
+    expect(s.settled).toBe(true);
+    expect(s.closedMonth).toBe("2026-08");
+    expect(s.firstMonth).toBe("2026-07");
+    expect(s.lastPaymentMonth).toBe("2026-08");
+    expect(s.totalPaid.toFixed(2)).toBe("2000.00");
+    expect(isIdleSettledRow(rows[3])).toBe(true);
+    expect(isIdleSettledRow(rows[1])).toBe(false);
+  });
+
+  it("a balance still owed is not settled; a ₹1 rounding residue is", () => {
+    expect(settlementOf(buildLenderMonths(months, "2000", "0", pay({ "2026-07": 1000 })), { explicitlyClosed: false }).settled).toBe(false);
+    expect(settlementOf(buildLenderMonths(months, "2000", "0", pay({ "2026-07": 1999.5 })), { explicitlyClosed: false }).settled).toBe(true);
+  });
+
+  it("a loan marked closed/foreclosed is settled even if the tracker still shows a balance", () => {
+    const s = settlementOf(buildLenderMonths(months, "2000", "0", pay({})), { explicitlyClosed: true });
+    expect(s.settled).toBe(true);
+    expect(s.closedMonth).toBeNull();
+  });
+
+  it("an unused card with no balance is settled only when zero counts as settled", () => {
+    const rows = buildLenderMonths(months, "0", "0", pay({}));
+    expect(settlementOf(rows, { explicitlyClosed: false }).settled).toBe(false);
+    const card = settlementOf(rows, { explicitlyClosed: false, zeroCountsAsSettled: true });
+    expect(card.settled).toBe(true);
+    expect(card.hadDebt).toBe(false);
+  });
+
+  it("spending again after paying off reopens it", () => {
+    const rows = buildLenderMonths(months, "1000", "0", (m) => (m === "2026-10" ? { ...flat(0), newBorrowing: d(500) } : pay({ "2026-07": 1000 })(m)));
+    expect(settlementOf(rows, { explicitlyClosed: false, zeroCountsAsSettled: true }).settled).toBe(false);
   });
 });
