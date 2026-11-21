@@ -84,13 +84,24 @@ export type DueInfo = { dueDate: Date | null; amountDue: Decimal | null; minimum
 
 const fmtDay = (d: Date) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" });
 
-function dueStatus(i: { dueDate: Date | null; amountDue: Decimal | null; minimumDue: Decimal | null; paid: Decimal; today: Date; source: DueInfo["source"]; label: string }): DueInfo {
+function dueStatus(i: {
+  dueDate: Date | null;
+  amountDue: Decimal | null;
+  minimumDue: Decimal | null;
+  paid: Decimal;
+  today: Date;
+  source: DueInfo["source"];
+  label: string;
+  /** The balance was cleared (≤ ₹1 left) — e.g. a loan's last, smaller EMI. Counts as paid. */
+  cleared?: boolean;
+}): DueInfo {
   const amount = i.amountDue;
   let status: DueStatus;
   if (amount !== null && amount.lessThanOrEqualTo(0)) status = "NO_DUE";
   else if (amount !== null && i.paid.greaterThanOrEqualTo(amount.minus(1))) status = "PAID";
   else if (amount === null && i.paid.greaterThan(0)) status = "PAID";
-  else if (i.minimumDue && i.minimumDue.greaterThan(0) && i.paid.greaterThanOrEqualTo(i.minimumDue)) status = "MIN_PAID";
+  else if (i.cleared && i.paid.greaterThan(0)) status = "PAID";
+  else if (i.minimumDue && i.minimumDue.greaterThan(0) && i.paid.greaterThanOrEqualTo(i.minimumDue.minus(1))) status = "MIN_PAID";
   else if (i.dueDate && i.today > i.dueDate) status = "OVERDUE";
   else if (i.paid.greaterThan(0)) status = "PART_PAID";
   else status = "DUE";
@@ -287,7 +298,14 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       const until = next ? next.statementDate : today;
       let paid = sum(txns.filter((t) => t.transactionType === "CARD_PAYMENT" && t.transactionDate > bill.statementDate && t.transactionDate <= until).map((t) => t.amount));
       if (!next && card.lastStatementDate?.getTime() === bill.statementDate.getTime()) paid = paid.plus(card.paidOnBill);
-      dues.set(m, dueStatus({ dueDate: bill.dueDate, amountDue: bill.totalDue, minimumDue: bill.minimumDue, paid, today, source: "statement", label: `Bill of ${fmtDay(bill.statementDate)}` }));
+      // A payment you typed into the tracker for this month counts too (e.g. card payments seen
+      // only in a bank statement that wasn't uploaded, or entered from the card statement).
+      // The next card statement's "payments / credits" shows what reached this bill, even when
+      // the bank statement with the payment wasn't uploaded.
+      if (next?.paymentsCredits) paid = Decimal.max(paid, toDecimal(next.paymentsCredits));
+      const row = months.find((r) => r.month === m);
+      if (row?.entered.includes("payment")) paid = Decimal.max(paid, row.payment);
+      dues.set(m, dueStatus({ dueDate: bill.dueDate, amountDue: bill.totalDue, minimumDue: bill.minimumDue, paid, today, source: "statement", label: `Bill of ${fmtDay(bill.statementDate)}`, cleared: Boolean(row && row.closing.lessThanOrEqualTo(1)) }));
     }
     out.push({
       key,
@@ -410,7 +428,7 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
     for (const r of months) {
       const row = loan.schedule.filter((x) => monthKey(x.dueDate) === r.month).sort((a, b) => a.installmentNumber - b.installmentNumber)[0];
       if (!row) continue;
-      dues.set(r.month, dueStatus({ dueDate: row.dueDate, amountDue: toDecimal(loan.emiAmount), minimumDue: null, paid: r.payment, today, source: "schedule", label: `EMI #${row.installmentNumber}` }));
+      dues.set(r.month, dueStatus({ dueDate: row.dueDate, amountDue: toDecimal(loan.emiAmount), minimumDue: null, paid: r.payment, today, source: "schedule", label: `EMI #${row.installmentNumber}`, cleared: r.closing.lessThanOrEqualTo(1) }));
     }
     out.push({
       key,
@@ -476,7 +494,7 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       if (!e.dueDate) continue;
       const row = l.months.find((r) => r.month === m);
       const auto = l.dues.get(m);
-      l.dues.set(m, dueStatus({ dueDate: e.dueDate, amountDue: auto?.amountDue ?? null, minimumDue: auto?.minimumDue ?? null, paid: auto?.paid ?? row?.payment ?? ZERO, today, source: "entered", label: auto?.label ?? "Due date" }));
+      l.dues.set(m, dueStatus({ dueDate: e.dueDate, amountDue: auto?.amountDue ?? null, minimumDue: auto?.minimumDue ?? null, paid: Decimal.max(auto?.paid ?? ZERO, row?.payment ?? ZERO), today, source: "entered", label: auto?.label ?? "Due date", cleared: Boolean(row && row.closing.lessThanOrEqualTo(1)) }));
     }
   }
 

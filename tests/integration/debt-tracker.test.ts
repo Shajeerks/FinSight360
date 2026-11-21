@@ -307,4 +307,23 @@ describe("Debt tracker (integration)", () => {
     await createTransaction(userId, { kind: "EXPENSE", transactionDate: t.current + "-01", amount: "250", account: `card:${cardId}`, description: "Swiggy" }, meta);
     expect((await buildDebtTracker(userId)).closedLenders.some((c) => c.key === `card:${cardId}`)).toBe(false);
   });
+  it("due status: a payment typed into the tracker counts (minimum / full), and a loan's smaller last EMI that clears it is paid", async () => {
+    await createTransaction(userId, { kind: "EXPENSE", transactionDate: "2026-09-10", amount: "10000", account: `card:${cardId}`, description: "Shopping" }, meta);
+    await saveCardBill(userId, { cardId, month: "2026-09", statementDate: "2026-09-15", dueDate: "2026-10-02", totalDue: "10000", minimumDue: "500" }, meta);
+    let l = await lender(`card:${cardId}`);
+    expect(l.dues.get("2026-10")!.status).toBe("OVERDUE"); // nothing recorded yet
+    await saveDebtEntry(userId, { month: "2026-10", lenderKey: `card:${cardId}`, payment: "499.80" }, meta);
+    l = await lender(`card:${cardId}`);
+    expect([l.dues.get("2026-10")!.status, fixed(l.dues.get("2026-10")!.paid)]).toEqual(["MIN_PAID", "499.80"]);
+    await saveDebtEntry(userId, { month: "2026-10", lenderKey: `card:${cardId}`, payment: "10000" }, meta);
+    expect((await lender(`card:${cardId}`)).dues.get("2026-10")!.status).toBe("PAID");
+
+    const loan = await createLoan(userId, { name: "Small loan", lender: "Amazon Pay", loanType: "PERSONAL", principal: "11000", interestRate: "9.5", startDate: "2026-07-01", firstEmiDate: "2026-08-05", tenureMonths: 2 }, meta);
+    const emi = loan.emiAmount;
+    await saveDebtEntry(userId, { month: "2026-08", lenderKey: `loan:${loan.id}`, payment: emi.toFixed(2) }, meta);
+    // The last instalment is a little smaller than the EMI and clears the loan.
+    await saveDebtEntry(userId, { month: "2026-09", lenderKey: `loan:${loan.id}`, payment: emi.minus(45).toFixed(2), closingOutstanding: "0" }, meta);
+    const ln = await lender(`loan:${loan.id}`);
+    expect(ln.dues.get("2026-09")!.status).toBe("PAID");
+  });
 });
