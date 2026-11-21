@@ -9,12 +9,16 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import type { RequestMeta } from "@/lib/security/request";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
-import { parseBankAlert, type ParsedEmailTxn } from "@/lib/email/parse";
-import { mailProvider, MailAuthError, type MailProviderName, type TokenSet } from "@/lib/email/providers";
+import { parseBankAlert, senderBank, type ParsedEmailTxn } from "@/lib/email/parse";
+import { mailProvider, MailAuthError, type MailClient, type MailProviderName, type TokenSet } from "@/lib/email/providers";
+import { verifyImap } from "@/lib/email/imap";
+import { imapHostFor, imapLabel, suggestStatementAccount, type AccountHint } from "@/lib/email/statements";
+import { MAX_UPLOAD_BYTES } from "@/lib/import/files";
+import { createImport } from "@/services/import.service";
 import { loadRulesForMatching } from "@/services/rule.service";
 import { collectAffected, emptyAffected, lockForWrite, recomputeAffected } from "@/services/ledger-balance.service";
 import { attachToExisting, createIngestedTransaction, findDuplicate, merchantFor, suggestCategory, type AccountRef, type IngestRow } from "@/services/ingestion.service";
-import { emailCandidateDecisionSchema, emailParsePreviewSchema, emailSyncSchema } from "@/validators/email";
+import { emailCandidateDecisionSchema, emailImapConnectSchema, emailParsePreviewSchema, emailStatementImportSchema, emailSyncSchema } from "@/validators/email";
 
 const NO_META: RequestMeta = { ip: null, userAgent: null };
 type Tx = Prisma.TransactionClient;
@@ -22,15 +26,22 @@ type Tx = Prisma.TransactionClient;
 /** Alerts at or above this confidence (known bank sender, account identified) count immediately. */
 export const EMAIL_AUTO_CONFIRM = 85;
 export const MAX_MESSAGES_PER_SYNC = 300;
+/** Statement emails looked at per sync (each may be downloaded and parsed). */
+export const MAX_STATEMENT_MAILS_PER_SYNC = 25;
 const STATE_TTL_MS = 10 * 60_000;
 
-export const PROVIDER_LABEL: Record<MailProviderName, string> = { GMAIL: "Gmail", OUTLOOK: "Outlook" };
+export const PROVIDER_LABEL: Record<MailProviderName, string> = { GMAIL: "Gmail", OUTLOOK: "Outlook", IMAP: "App password" };
+
+/** Name shown for a mailbox: IMAP ones are named after their mail server (Gmail, Yahoo Mail, …). */
+export function connectionLabel(c: { provider: MailProviderName; imapHost?: string | null }) {
+  return c.provider === "IMAP" ? imapLabel(c.imapHost ?? null) : PROVIDER_LABEL[c.provider];
+}
 
 function redirectUri(provider: MailProviderName) {
   return `${env().APP_URL}/api/email/callback/${provider.toLowerCase()}`;
 }
 
-export function providerFromParam(p: string): MailProviderName {
+export function providerFromParam(p: string): "GMAIL" | "OUTLOOK" {
   if (p === "gmail") return "GMAIL";
   if (p === "outlook") return "OUTLOOK";
   throw new NotFoundError("Unknown email provider.");
@@ -97,8 +108,49 @@ export async function completeConnect(
   return conn;
 }
 
+// ───────────────────────────── app-password (IMAP) connect ─────────────────────────────
+
+/**
+ * Connects Gmail, Yahoo or another mailbox with an app password. The login is
+ * checked first; the password is then stored encrypted (AES-GCM) and only used
+ * to read the INBOX (opened read-only).
+ */
+export async function connectImap(userId: string, input: unknown, meta: RequestMeta = NO_META) {
+  const d = parseOrThrow(emailImapConnectSchema, input);
+  requireEncryptionKey();
+  const host = d.host || imapHostFor(d.email);
+  if (!host) throw new AppError("Enter your provider's IMAP server (for example imap.example.com).", 400, "IMAP_HOST_REQUIRED", { host: ["Enter the IMAP server"] });
+  try {
+    await verifyImap({ host, user: d.email, pass: d.appPassword });
+  } catch (e) {
+    if (e instanceof MailAuthError) {
+      throw new AppError(
+        "The email or app password was not accepted. Use an app password (not your normal password) and make sure IMAP is allowed for this mailbox.",
+        400,
+        "IMAP_LOGIN_FAILED",
+        { appPassword: ["Not accepted by the mail server"] },
+      );
+    }
+    throw new AppError(`Couldn't reach ${host}. Check the server name and try again.`, 502, "IMAP_UNREACHABLE");
+  }
+  const secret = encryptSecret(JSON.stringify({ host, user: d.email, pass: d.appPassword }));
+  const where = { userId_provider_emailAddress: { userId, provider: "IMAP" as const, emailAddress: d.email } };
+  const existing = await prisma.emailConnection.findUnique({ where });
+  const conn = await prisma.emailConnection.upsert({
+    where,
+    update: { status: "ACTIVE", accessTokenEnc: secret, refreshTokenEnc: null, tokenExpiresAt: null, imapHost: host, scopes: "imap:read", lastError: null },
+    create: { userId, provider: "IMAP", emailAddress: d.email, status: "ACTIVE", accessTokenEnc: secret, imapHost: host, scopes: "imap:read" },
+  });
+  await audit({ userId, action: AuditAction.EMAIL_CONNECTED, entityType: "EmailConnection", entityId: conn.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { provider: "IMAP", host, reconnect: Boolean(existing) } });
+  return conn;
+}
+
 async function freshAccessToken(conn: EmailConnection): Promise<string> {
   requireEncryptionKey();
+  if (conn.provider === "IMAP") {
+    if (!conn.accessTokenEnc) throw new MailAuthError("No app password stored");
+    return decryptSecret(conn.accessTokenEnc);
+  }
   if (conn.accessTokenEnc && conn.tokenExpiresAt && conn.tokenExpiresAt.getTime() > Date.now() + 60_000) return decryptSecret(conn.accessTokenEnc);
   if (!conn.refreshTokenEnc) throw new MailAuthError("No refresh token");
   const t: TokenSet = await mailProvider(conn.provider).refresh(decryptSecret(conn.refreshTokenEnc));
@@ -227,7 +279,17 @@ const candidateInclude = { emailMessage: { select: { providerMessageId: true, co
 
 // ───────────────────────────── sync ─────────────────────────────
 
-export type SyncSummary = { fetched: number; transactions: number; linked: number; needsAccount: number; notFinancial: number; failed: number };
+export type SyncSummary = {
+  fetched: number;
+  transactions: number;
+  linked: number;
+  needsAccount: number;
+  notFinancial: number;
+  failed: number;
+  /** Statement files found in emails, and how many of those were opened as an import automatically. */
+  statements: number;
+  statementsImported: number;
+};
 
 /**
  * Fetches new bank/card alerts since the last sync (or `days` back on the
@@ -241,10 +303,11 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
   const running = await prisma.emailSyncJob.findFirst({ where: { connectionId: conn.id, status: "RUNNING", startedAt: { gt: new Date(Date.now() - 10 * 60_000) } } });
   if (running) throw new AppError("A sync for this mailbox is already running.", 409, "SYNC_RUNNING");
   const job = await prisma.emailSyncJob.create({ data: { connectionId: conn.id, status: "RUNNING" } });
-  const summary: SyncSummary = { fetched: 0, transactions: 0, linked: 0, needsAccount: 0, notFinancial: 0, failed: 0 };
+  const summary: SyncSummary = { fetched: 0, transactions: 0, linked: 0, needsAccount: 0, notFinancial: 0, failed: 0, statements: 0, statementsImported: 0 };
   const startedAt = new Date();
+  let client: MailClient | null = null;
   try {
-    const client = mailProvider(conn.provider).client(await freshAccessToken(conn));
+    client = mailProvider(conn.provider).client(await freshAccessToken(conn));
     const since = conn.lastSyncAt ? new Date(conn.lastSyncAt.getTime() - 2 * 86_400_000) : new Date(Date.now() - days * 86_400_000);
     const ids = await client.listBankMessageIds(since, MAX_MESSAGES_PER_SYNC);
     const known = new Set((await prisma.emailMessage.findMany({ where: { connectionId: conn.id, providerMessageId: { in: ids } }, select: { providerMessageId: true } })).map((m) => m.providerMessageId));
@@ -285,6 +348,7 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
         logger.warn("email_message_failed", { provider: conn.provider, error: e });
       }
     }
+    await collectStatements(userId, conn.id, client, since, summary);
     await prisma.emailConnection.updateMany({ where: { id: conn.id, status: { not: "DISCONNECTED" } }, data: { lastSyncAt: startedAt, lastError: null, status: "ACTIVE" } });
     await prisma.emailSyncJob.update({
       where: { id: job.id },
@@ -301,6 +365,19 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
         dedupeKey: `email-sync:${job.id}`,
       }).catch(() => undefined);
     }
+    if (summary.statements) {
+      const { notify } = await import("@/services/notification.service");
+      const waiting = summary.statements - summary.statementsImported;
+      await notify(userId, {
+        type: "IMPORT",
+        title: `${summary.statements} statement(s) found in ${conn.emailAddress}`,
+        body: waiting
+          ? `${waiting} need a password or an account before they can be read.${summary.statementsImported ? ` ${summary.statementsImported} are ready to review.` : ""}`
+          : "Ready to review and add to your accounts.",
+        link: "/imports/email#statements",
+        dedupeKey: `email-statements:${job.id}`,
+      }).catch(() => undefined);
+    }
     return summary;
   } catch (e) {
     const expired = e instanceof MailAuthError;
@@ -310,8 +387,143 @@ export async function syncEmailConnection(userId: string, connectionId: string, 
     if (e instanceof AppError) throw e;
     logger.error("email_sync_failed", { provider: conn.provider, error: e });
     throw new AppError("Couldn't reach the mail provider. Please try again later.", 502, "PROVIDER_UNAVAILABLE");
+  } finally {
+    await client?.close?.().catch(() => undefined);
   }
 }
+
+// ───────────────────────────── statements attached to emails ─────────────────────────────
+
+async function accountHints(userId: string): Promise<AccountHint[]> {
+  const [banks, cards] = await Promise.all([
+    prisma.bankAccount.findMany({ where: { userId, deletedAt: null }, select: { id: true, bankName: true, last4: true } }),
+    prisma.creditCard.findMany({ where: { userId, deletedAt: null }, select: { id: true, bankName: true, last4: true } }),
+  ]);
+  return [
+    ...banks.map((b) => ({ ref: `bank:${b.id}`, kind: "bank" as const, bankName: b.bankName, last4: b.last4 })),
+    ...cards.map((c) => ({ ref: `card:${c.id}`, kind: "card" as const, bankName: c.bankName, last4: c.last4 })),
+  ];
+}
+
+/**
+ * Finds statement files (PDF / CSV / XLSX) attached to bank emails since `since`.
+ * Each file is listed once. When its account is clear from the email and it opens
+ * without a password, it is read straight away into an import waiting for your review
+ * (nothing reaches the ledger until you confirm it). Otherwise it waits for you to
+ * choose the account and type the PDF password — passwords are never stored.
+ */
+async function collectStatements(userId: string, connectionId: string, client: MailClient, since: Date, summary: SyncSummary) {
+  const ids = await client.listStatementMessageIds(since, MAX_STATEMENT_MAILS_PER_SYNC);
+  if (!ids.length) return;
+  const known = new Set((await prisma.emailStatement.findMany({ where: { connectionId, providerMessageId: { in: ids } }, select: { providerMessageId: true } })).map((m) => m.providerMessageId));
+  const fresh = ids.filter((x) => !known.has(x)).reverse();
+  if (!fresh.length) return;
+  const hints = await accountHints(userId);
+  for (const id of fresh) {
+    try {
+      const mail = await client.getStatementMail(id);
+      for (const f of mail.files) {
+        const tooBig = f.size !== null && f.size > MAX_UPLOAD_BYTES;
+        const suggested = suggestStatementAccount({ subject: mail.subject, fileName: f.fileName, bank: senderBank(mail.from)?.bank ?? null }, hints);
+        const created = await prisma.emailStatement.createManyAndReturn({
+          data: [{
+            userId,
+            connectionId,
+            providerMessageId: id,
+            attachmentRef: f.ref,
+            fileName: f.fileName.slice(0, 200),
+            mimeType: f.mimeType,
+            sizeBytes: f.size,
+            fromAddress: mail.from.slice(0, 200),
+            subject: mail.subject.slice(0, 300),
+            receivedAt: mail.receivedAt,
+            suggestedAccount: suggested,
+            errorMessage: tooBig ? "This file is larger than 10 MB — download it from the email and split it." : null,
+          }],
+          skipDuplicates: true,
+        });
+        if (!created.length) continue;
+        summary.statements++;
+        if (suggested && !tooBig && (await readStatement(userId, created[0].id, client, suggested, null, true))) summary.statementsImported++;
+      }
+    } catch (e) {
+      if (e instanceof MailAuthError) throw e;
+      summary.failed++;
+      logger.warn("email_statement_failed", { error: e });
+    }
+  }
+}
+
+/**
+ * Downloads one statement file from the mailbox and opens it as an import.
+ * Returns the import id, or null when (automatically) it needs a password / failed.
+ */
+async function readStatement(userId: string, statementId: string, client: MailClient, account: string, password: string | null, automatic: boolean): Promise<string | null> {
+  const st = await prisma.emailStatement.findFirstOrThrow({ where: { id: statementId, userId } });
+  const buffer = await client.downloadAttachment(st.providerMessageId, { ref: st.attachmentRef, fileName: st.fileName });
+  try {
+    const imp = await createImport(userId, { file: { name: st.fileName, type: st.mimeType ?? "", buffer }, account, password });
+    await prisma.emailStatement.update({ where: { id: st.id }, data: { status: "IMPORTED", importId: imp.id, needsPassword: false, errorMessage: null, suggestedAccount: account } });
+    return imp.id;
+  } catch (e) {
+    if (!(e instanceof AppError)) throw e;
+    if (!automatic) throw e;
+    const needsPassword = e.code === "PDF_PASSWORD_REQUIRED" || e.code === "PDF_PASSWORD_INCORRECT";
+    await prisma.emailStatement.update({ where: { id: st.id }, data: { needsPassword, errorMessage: needsPassword ? null : e.message.slice(0, 300) } });
+    return null;
+  }
+}
+
+/** Reads a statement you picked: you choose the account and type the PDF password (used once, never stored). */
+export async function importEmailStatement(userId: string, id: string, input: unknown, meta: RequestMeta = NO_META) {
+  assertIds(id);
+  const d = parseOrThrow(emailStatementImportSchema, input);
+  const st = await prisma.emailStatement.findFirst({ where: { id, userId }, include: { connection: true } });
+  if (!st) throw new NotFoundError("Statement not found.");
+  if (st.status === "IMPORTED" && st.importId) return { importId: st.importId, already: true };
+  if (st.connection.status === "DISCONNECTED") throw new AppError("This mailbox is disconnected. Connect it again to read the statement.", 409, "DISCONNECTED");
+  let client: MailClient | null = null;
+  try {
+    client = mailProvider(st.connection.provider).client(await freshAccessToken(st.connection));
+    const importId = await readStatement(userId, st.id, client, d.account, d.password || null, false);
+    await audit({ userId, action: AuditAction.EMAIL_STATEMENT_IMPORTED, entityType: "EmailStatement", entityId: st.id, ip: meta.ip, userAgent: meta.userAgent, metadata: { importId } });
+    return { importId: importId!, already: false };
+  } catch (e) {
+    if (e instanceof MailAuthError) {
+      await prisma.emailConnection.updateMany({ where: { id: st.connectionId, status: { not: "DISCONNECTED" } }, data: { status: "EXPIRED", lastError: "Access expired or was revoked — reconnect this mailbox." } });
+      throw new AppError("Access to this mailbox expired. Reconnect it, then try again.", 401, "RECONNECT_REQUIRED");
+    }
+    if (e instanceof AppError) throw e;
+    logger.error("email_statement_import_failed", { error: e });
+    throw new AppError("Couldn't download the statement from your mailbox. Please try again.", 502, "PROVIDER_UNAVAILABLE");
+  } finally {
+    await client?.close?.().catch(() => undefined);
+  }
+}
+
+export async function dismissEmailStatement(userId: string, id: string, meta: RequestMeta = NO_META) {
+  assertIds(id);
+  const r = await prisma.emailStatement.updateMany({ where: { id, userId, status: "PENDING" }, data: { status: "DISMISSED" } });
+  if (!r.count) throw new NotFoundError("Statement not found.");
+  await audit({ userId, action: AuditAction.EMAIL_STATEMENT_DISMISSED, entityType: "EmailStatement", entityId: id, ip: meta.ip, userAgent: meta.userAgent });
+}
+
+/** Statements waiting for you, plus the most recent ones already read. */
+export async function listEmailStatements(userId: string) {
+  const select = {
+    id: true, fileName: true, fromAddress: true, subject: true, receivedAt: true, suggestedAccount: true, needsPassword: true, status: true, importId: true, errorMessage: true,
+    connection: { select: { emailAddress: true, provider: true, imapHost: true } },
+  } as const;
+  const [pending, recent] = await Promise.all([
+    prisma.emailStatement.findMany({ where: { userId, status: "PENDING" }, orderBy: { receivedAt: "desc" }, take: 100, select }),
+    prisma.emailStatement.findMany({ where: { userId, status: "IMPORTED" }, orderBy: { updatedAt: "desc" }, take: 10, select }),
+  ]);
+  const imports = await prisma.transactionImport.findMany({ where: { userId, id: { in: recent.map((r) => r.importId!).filter(Boolean) } }, select: { id: true, status: true } });
+  const importStatus = new Map(imports.map((i) => [i.id, i.status]));
+  return { pending, recent: recent.map((r) => ({ ...r, importStatus: r.importId ? (importStatus.get(r.importId) ?? null) : null })) };
+}
+
+export type EmailStatementList = Awaited<ReturnType<typeof listEmailStatements>>;
 
 async function createAndIngest(userId: string, emailMessageId: string, p: ParsedEmailTxn) {
   return prisma.$transaction(async (tx) => {
@@ -414,7 +626,7 @@ export async function listEmailConnections(userId: string) {
     where: { userId },
     orderBy: { createdAt: "asc" },
     select: {
-      id: true, provider: true, emailAddress: true, status: true, lastSyncAt: true, lastError: true, createdAt: true,
+      id: true, provider: true, emailAddress: true, status: true, lastSyncAt: true, lastError: true, createdAt: true, imapHost: true,
       syncJobs: { orderBy: { startedAt: "desc" }, take: 1, select: { status: true, startedAt: true, finishedAt: true, messagesFetched: true, candidatesCreated: true, failedCount: true } },
       _count: { select: { messages: true } },
     },

@@ -50,6 +50,8 @@ export const AuditAction = {
   EMAIL_DISCONNECTED: "email.disconnected",
   EMAIL_SYNCED: "email.synced",
   EMAIL_CANDIDATE_RESOLVED: "email.candidate_resolved",
+  EMAIL_STATEMENT_IMPORTED: "email.statement_imported",
+  EMAIL_STATEMENT_DISMISSED: "email.statement_dismissed",
   INVESTMENT_ACCOUNT_CREATED: "investment.account_created",
   INVESTMENT_ACCOUNT_UPDATED: "investment.account_updated",
   INVESTMENT_ACCOUNT_DELETED: "investment.account_deleted",

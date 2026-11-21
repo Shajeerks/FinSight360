@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, Inbox, Lock, Mail, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileText, Inbox, Lock, Mail, ShieldCheck } from "lucide-react";
 import { requireUser } from "@/lib/auth/session";
 import { formatDate } from "@/lib/dates";
-import { emailProvidersStatus, listEmailCandidates, listEmailConnections, PROVIDER_LABEL } from "@/services/email.service";
+import { connectionLabel, emailProvidersStatus, listEmailCandidates, listEmailConnections, listEmailStatements, PROVIDER_LABEL } from "@/services/email.service";
 import { getTransactionFormOptions } from "@/services/transaction.service";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { DisconnectButton, ParserPlayground, SyncNowButton, UnplacedAlerts, type CandidateView } from "@/features/email/email-components";
+import { ConnectWithAppPassword, PendingStatements, type StatementView } from "@/features/email/statement-components";
 
 export const metadata: Metadata = { title: "Email Sync" };
 
@@ -32,7 +33,12 @@ const STATUS: Record<string, { label: string; variant: "success" | "warning" | "
 export default async function EmailSyncPage(props: PageProps<"/imports/email">) {
   const sp = await props.searchParams;
   const user = await requireUser();
-  const [connections, candidates, options] = await Promise.all([listEmailConnections(user.id), listEmailCandidates(user.id), getTransactionFormOptions(user.id)]);
+  const [connections, candidates, options, statements] = await Promise.all([
+    listEmailConnections(user.id),
+    listEmailCandidates(user.id),
+    getTransactionFormOptions(user.id),
+    listEmailStatements(user.id),
+  ]);
   const providers = emailProvidersStatus();
   const error = typeof sp.error === "string" ? (ERRORS[sp.error] ?? "Something went wrong while connecting. Please try again.") : null;
   const connected = typeof sp.connected === "string" ? connections.find((c) => c.id === sp.connected) : null;
@@ -49,25 +55,35 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
     confidence: Number(c.confidenceScore),
   }));
   const accounts = options.accounts.filter((a) => a.kind !== "cash");
+  const accountLabel = new Map(accounts.map((a) => [a.ref, a.label]));
+  const pendingStatements: StatementView[] = statements.pending.map((s) => ({
+    id: s.id,
+    fileName: s.fileName,
+    from: s.fromAddress,
+    subject: s.subject,
+    received: formatDate(s.receivedAt),
+    mailbox: s.connection.emailAddress,
+    suggestedAccount: s.suggestedAccount && accountLabel.has(s.suggestedAccount) ? s.suggestedAccount : null,
+    needsPassword: s.needsPassword,
+    isPdf: /\.pdf$/i.test(s.fileName) || s.fileName.toLowerCase().endsWith("pdf"),
+    error: s.errorMessage,
+  }));
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Email Sync"
-        description="Import transactions from your bank and card alert emails in Gmail or Outlook. Matching alerts and statement rows become one transaction."
+        description="Connect every mailbox your bank and card emails go to (Gmail, Yahoo and more). Alerts become transactions, and statements attached to emails are picked up for you to review."
         actions={
           <div className="flex flex-wrap gap-2">
-            {(["GMAIL", "OUTLOOK"] as const).map((p) =>
-              providers[p] ? (
-                <Button key={p} asChild variant={p === "GMAIL" ? "default" : "outline"}>
-                  <a href={`/api/email/connect/${p.toLowerCase()}`}><Mail /> Connect {PROVIDER_LABEL[p]}</a>
+            <ConnectWithAppPassword />
+            {(["GMAIL", "OUTLOOK"] as const)
+              .filter((p) => providers[p])
+              .map((p) => (
+                <Button key={p} asChild variant="outline">
+                  <a href={`/api/email/connect/${p.toLowerCase()}`}><Mail /> Sign in with {PROVIDER_LABEL[p]}</a>
                 </Button>
-              ) : (
-                <Button key={p} variant="outline" disabled title={`${PROVIDER_LABEL[p]} isn't configured yet`}>
-                  <Mail /> Connect {PROVIDER_LABEL[p]}
-                </Button>
-              ),
-            )}
+              ))}
           </div>
         }
       />
@@ -76,7 +92,7 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
       {connected && (
         <Alert variant="success">
           <CheckCircle2 />
-          <span>{connected.emailAddress} is connected. Press <strong>Sync now</strong> to read your recent bank alerts.</span>
+          <span>{connected.emailAddress} is connected. Press <strong>Sync now</strong> to read your recent bank alerts and statements.</span>
         </Alert>
       )}
 
@@ -85,7 +101,7 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
           <CardTitle>Connected mailboxes</CardTitle>
           <CardDescription className="flex items-start gap-1.5">
             <ShieldCheck className="mt-0.5 size-4 shrink-0 text-success" />
-            Read-only access to alerts from bank senders. Your email password is never seen; access tokens are encrypted; email bodies are read in memory and not stored.
+            Read-only access to emails from bank senders. App passwords and access tokens are stored encrypted; email bodies are read in memory and not stored. Every mailbox is checked automatically once a day (about 7 AM).
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
@@ -94,7 +110,7 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
               <Inbox className="size-6 text-muted-foreground" />
               <p className="font-medium">No mailbox connected</p>
               <p className="max-w-md text-sm text-muted-foreground">
-                {providers.GMAIL || providers.OUTLOOK ? "Use Connect Gmail or Connect Outlook above." : "Email sync needs a one-time setup on this computer (below). Until then you can test the alert reader at the bottom of this page."}
+                Use <strong>Connect with app password</strong> above for each mailbox your bank or card emails go to — for example your HDFC account emails in Gmail and your card emails in Yahoo.
               </p>
             </div>
           ) : (
@@ -107,7 +123,7 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
                     <div className="min-w-0 space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="truncate font-medium">{c.emailAddress}</span>
-                        <Badge variant="secondary">{PROVIDER_LABEL[c.provider]}</Badge>
+                        <Badge variant="secondary">{connectionLabel(c)}</Badge>
                         <Badge variant={st.variant}>{st.label}</Badge>
                       </div>
                       <p className="text-xs text-muted-foreground">
@@ -118,7 +134,11 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       {c.status === "EXPIRED" || c.status === "DISCONNECTED" ? (
-                        <Button asChild size="sm" variant="outline"><a href={`/api/email/connect/${c.provider.toLowerCase()}`}>Reconnect</a></Button>
+                        c.provider === "IMAP" ? (
+                          <ConnectWithAppPassword email={c.emailAddress} variant="outline" />
+                        ) : (
+                          <Button asChild size="sm" variant="outline"><a href={`/api/email/connect/${c.provider.toLowerCase()}`}>Reconnect</a></Button>
+                        )
                       ) : (
                         <SyncNowButton id={c.id} firstSync={!c.lastSyncAt} />
                       )}
@@ -128,6 +148,42 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
                 );
               })}
             </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card id="statements">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><FileText className="size-4 text-primary" /> Statements from your email</CardTitle>
+          <CardDescription>
+            PDF, CSV and Excel statements attached to bank and card emails. When the account is clear and the file isn&apos;t locked, it&apos;s read straight away and waits for your review. Otherwise choose the account and type the PDF password — the password is used once and never stored.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {pendingStatements.length > 0 ? (
+            <PendingStatements items={pendingStatements} accounts={accounts.map((a) => ({ ref: a.ref, label: a.label }))} />
+          ) : (
+            <p className="text-sm text-muted-foreground">{connections.length ? "No statements waiting. New ones appear here after each sync." : "Connect a mailbox to pick up statements automatically."}</p>
+          )}
+          {statements.recent.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-muted-foreground">Recently read</p>
+              <ul className="divide-y rounded-xl border text-sm">
+                {statements.recent.map((s) => (
+                  <li key={s.id} className="flex flex-col gap-1 p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{s.fileName}</p>
+                      <p className="truncate text-xs text-muted-foreground">{formatDate(s.receivedAt)} · {s.suggestedAccount ? (accountLabel.get(s.suggestedAccount) ?? "Account removed") : ""} · {s.connection.emailAddress}</p>
+                    </div>
+                    {s.importId && (
+                      <Link href={`/imports/${s.importId}`} className="shrink-0 text-xs font-medium text-primary hover:underline">
+                        {s.importStatus === "COMPLETED" ? "Added — view import" : s.importStatus === "CANCELLED" || s.importStatus === "FAILED" ? "Import cancelled" : "Review and add →"}
+                      </Link>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -151,23 +207,24 @@ export default async function EmailSyncPage(props: PageProps<"/imports/email">) 
           </CardHeader>
           <CardContent className="space-y-2 text-sm text-muted-foreground">
             <p>• Only messages from known bank and card senders are read (HDFC, ICICI, SBI, Axis, Kotak and 15 more).</p>
-            <p>• OTPs, offers, statements, reminders and declined payments are skipped.</p>
+            <p>• OTPs, offers, reminders and declined payments are skipped. Statement attachments are listed under <em>Statements from your email</em>.</p>
             <p>• The account is matched by its last 4 digits — add them to your accounts and cards for automatic placement.</p>
             <p>• Clear alerts from a known bank are added straight away; anything uncertain waits in the <Link className="font-medium text-foreground underline underline-offset-2" href="/imports/review">Review Queue</Link>.</p>
             <p>• If the same transaction is already in your ledger (manual entry or statement), the alert is linked to it — never counted twice.</p>
+            <p>• A statement read from email goes through the same review screen as an upload: nothing is added until you confirm it.</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Lock className="size-4" /> One-time setup</CardTitle>
-            <CardDescription>
-              Gmail: {providers.GMAIL ? "configured ✓" : "not configured"} · Outlook: {providers.OUTLOOK ? "configured ✓" : "not configured"} · Token encryption: {providers.encryption ? "on ✓" : "missing"}
-            </CardDescription>
+            <CardTitle className="flex items-center gap-2"><Lock className="size-4" /> Getting an app password</CardTitle>
+            <CardDescription>An app password lets FinSight360 read your mail without your real password. You can delete it at your provider any time.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm text-muted-foreground">
-            <p><strong className="text-foreground">Gmail:</strong> in Google Cloud Console create an OAuth client (Web application), enable the Gmail API, add the redirect URI <code className="break-all rounded bg-muted px-1">http://localhost:3010/api/email/callback/gmail</code>, add yourself as a test user, then put the client id/secret in <code>GMAIL_CLIENT_ID</code> / <code>GMAIL_CLIENT_SECRET</code> in .env and restart.</p>
-            <p><strong className="text-foreground">Outlook:</strong> register an app in Microsoft Entra with redirect URI <code className="break-all rounded bg-muted px-1">http://localhost:3010/api/email/callback/outlook</code> and the delegated permission Mail.Read, then set <code>MICROSOFT_CLIENT_ID</code> / <code>MICROSOFT_CLIENT_SECRET</code>.</p>
-            <p>Details are in the README (section “Email sync”).</p>
+            <p><strong className="text-foreground">Gmail:</strong> turn on 2-Step Verification, then open <span className="text-foreground">myaccount.google.com/apppasswords</span>, create one named “FinSight360” and paste the 16 letters here.</p>
+            <p><strong className="text-foreground">Yahoo Mail:</strong> Account Info → Account security → <span className="text-foreground">Generate app password</span> (name it “FinSight360”) and paste it here.</p>
+            <p><strong className="text-foreground">Others:</strong> look for “app password” in the account&apos;s security settings; you may also need the IMAP server name.</p>
+            {(providers.GMAIL || providers.OUTLOOK) && <p className="text-xs">Sign in with Gmail / Outlook (OAuth) is also set up on this instance.</p>}
+            {!providers.encryption && <p className="text-xs text-destructive">TOKEN_ENCRYPTION_KEY is missing — add it to the environment before connecting a mailbox.</p>}
           </CardContent>
         </Card>
       </div>

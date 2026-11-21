@@ -1,6 +1,8 @@
 import "server-only";
 import { BANK_SENDER_DOMAINS, senderBank } from "@/lib/email/parse";
-import { emailAddressOf, gmailPayloadText, headerValue, htmlToText } from "@/lib/email/text";
+import { emailAddressOf, gmailPayloadText, gmailStatementParts, headerValue, htmlToText } from "@/lib/email/text";
+import { isStatementFile, STATEMENT_GMAIL_QUERY } from "@/lib/email/statements";
+import { imapClient } from "@/lib/email/imap";
 
 /**
  * Gmail (Gmail API) and Outlook (Microsoft Graph) mail access over plain HTTPS.
@@ -8,14 +10,25 @@ import { emailAddressOf, gmailPayloadText, headerValue, htmlToText } from "@/lib
  * request and never logged. Tests swap the provider with `setMailProviderOverride`.
  */
 
-export type MailProviderName = "GMAIL" | "OUTLOOK";
+export type MailProviderName = "GMAIL" | "OUTLOOK" | "IMAP";
 export type RawMail = { id: string; threadId: string | null; from: string; subject: string; receivedAt: Date; text: string };
+/** A statement file attached to an email (PDF / CSV / XLSX). `ref` is the provider's id for it. */
+export type MailAttachment = { ref: string; fileName: string; mimeType: string | null; size: number | null };
+export type StatementMail = { id: string; from: string; subject: string; receivedAt: Date; files: MailAttachment[] };
 export type TokenSet = { accessToken: string; refreshToken?: string | null; expiresAt: Date; scope?: string | null };
 
 export interface MailClient {
   /** Ids of messages from known bank senders received at/after `since` (newest first, at most `max`). */
   listBankMessageIds(since: Date, max: number): Promise<string[]>;
   getMessage(id: string): Promise<RawMail>;
+  /** Ids of messages from known bank senders, at/after `since`, that carry a statement attachment. */
+  listStatementMessageIds(since: Date, max: number): Promise<string[]>;
+  /** Headers of a message plus its statement attachments (names only — nothing downloaded). */
+  getStatementMail(id: string): Promise<StatementMail>;
+  /** Downloads one attachment (looked up again by name: Gmail attachment ids change between fetches). */
+  downloadAttachment(messageId: string, file: { ref: string; fileName: string }): Promise<Buffer>;
+  /** Releases a held connection (IMAP). */
+  close?(): Promise<void>;
 }
 
 export interface MailProvider {
@@ -125,6 +138,29 @@ const gmail: MailProvider = {
           text: gmailPayloadText(m.payload).slice(0, 20_000),
         };
       },
+      async listStatementMessageIds(since, max) {
+        const q = `from:(${BANK_SENDER_DOMAINS.join(" OR ")}) has:attachment ${STATEMENT_GMAIL_QUERY} after:${Math.floor(since.getTime() / 1000)} -in:chats -in:spam -in:trash`;
+        const r = await call<{ messages?: { id: string }[] }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${new URLSearchParams({ q, maxResults: String(Math.min(100, max)) })}`, { accessToken });
+        return (r.messages ?? []).map((m) => m.id).slice(0, max);
+      },
+      async getStatementMail(id) {
+        type Msg = { id: string; internalDate?: string; payload?: Parameters<typeof gmailStatementParts>[0] & { headers?: { name: string; value: string }[] } };
+        const m = await call<Msg>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`, { accessToken });
+        return {
+          id: m.id,
+          from: headerValue(m.payload?.headers, "From"),
+          subject: headerValue(m.payload?.headers, "Subject"),
+          receivedAt: new Date(Number(m.internalDate ?? Date.now())),
+          files: gmailStatementParts(m.payload).filter((f) => isStatementFile(f.fileName, f.mimeType)),
+        };
+      },
+      async downloadAttachment(messageId, file) {
+        type Msg = { payload?: Parameters<typeof gmailStatementParts>[0] };
+        const m = await call<Msg>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=full`, { accessToken });
+        const ref = gmailStatementParts(m.payload).find((f) => f.fileName === file.fileName)?.ref ?? file.ref;
+        const a = await call<{ data?: string }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(ref)}`, { accessToken });
+        return Buffer.from((a.data ?? "").replace(/-/g, "+").replace(/_/g, "/"), "base64");
+      },
     };
   },
 };
@@ -196,7 +232,71 @@ const outlook: MailProvider = {
           text: (m.body?.contentType === "html" ? htmlToText(body) : body).slice(0, 20_000),
         };
       },
+      async listStatementMessageIds(since, max) {
+        const ids: string[] = [];
+        let url: string | undefined =
+          `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?${new URLSearchParams({ $filter: `receivedDateTime ge ${since.toISOString()} and hasAttachments eq true`, $orderby: "receivedDateTime desc", $select: "id,from", $top: "50" })}`;
+        let scanned = 0;
+        while (url && ids.length < max && scanned < 1000) {
+          const r: { value: { id: string; from?: { emailAddress?: { address?: string } } }[]; "@odata.nextLink"?: string } = await call(url, { accessToken });
+          for (const m of r.value) {
+            scanned++;
+            if (senderBank(m.from?.emailAddress?.address ?? "")) ids.push(m.id);
+          }
+          url = r["@odata.nextLink"];
+        }
+        return ids.slice(0, max);
+      },
+      async getStatementMail(id) {
+        type Msg = { id: string; subject?: string; receivedDateTime: string; from?: { emailAddress?: { address?: string } } };
+        const m = await call<Msg>(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(id)}?$select=id,subject,receivedDateTime,from`, { accessToken });
+        const a = await call<{ value: { id: string; name?: string; contentType?: string; size?: number }[] }>(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(id)}/attachments?$select=id,name,contentType,size`, { accessToken });
+        return {
+          id: m.id,
+          from: emailAddressOf(m.from?.emailAddress?.address ?? ""),
+          subject: m.subject ?? "",
+          receivedAt: new Date(m.receivedDateTime),
+          files: a.value
+            .map((x) => ({ ref: x.id, fileName: x.name ?? "statement", mimeType: x.contentType ?? null, size: x.size ?? null }))
+            .filter((f) => isStatementFile(f.fileName, f.mimeType)),
+        };
+      },
+      async downloadAttachment(messageId, file) {
+        const a = await call<{ contentBytes?: string }>(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(file.ref)}`, { accessToken });
+        return Buffer.from(a.contentBytes ?? "", "base64");
+      },
     };
+  },
+};
+
+// ───────────────────────────── IMAP (app password: Gmail, Yahoo, …) ─────────────────────────────
+
+/**
+ * IMAP mailboxes connect with an app password instead of OAuth. The "access token"
+ * handed to `client()` is the decrypted JSON {host, user, pass}; there is nothing to
+ * refresh or revoke (the user deletes the app password at their provider).
+ */
+const imap: MailProvider = {
+  name: "IMAP",
+  scopes: "imap:read",
+  configured: () => true,
+  authUrl() {
+    throw new MailProviderError("IMAP mailboxes connect with an app password", 400);
+  },
+  async exchangeCode() {
+    throw new MailProviderError("IMAP mailboxes connect with an app password", 400);
+  },
+  async refresh() {
+    throw new MailAuthError("IMAP passwords don't expire — enter the app password again");
+  },
+  async profileEmail(secret) {
+    return (JSON.parse(secret) as { user: string }).user.toLowerCase();
+  },
+  async revoke() {
+    // Nothing to revoke: the stored app password is deleted; the user can also delete it at the provider.
+  },
+  client(secret) {
+    return imapClient(JSON.parse(secret) as { host: string; user: string; pass: string });
   },
 };
 
@@ -209,5 +309,5 @@ export function setMailProviderOverride(name: MailProviderName, provider: MailPr
 }
 
 export function mailProvider(name: MailProviderName): MailProvider {
-  return overrides.get(name) ?? (name === "GMAIL" ? gmail : outlook);
+  return overrides.get(name) ?? (name === "GMAIL" ? gmail : name === "IMAP" ? imap : outlook);
 }

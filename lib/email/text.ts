@@ -34,7 +34,18 @@ function b64urlDecode(data: string): string {
   return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 }
 
-type GmailPart = { mimeType?: string; body?: { data?: string; size?: number }; parts?: GmailPart[]; filename?: string };
+type GmailPart = { mimeType?: string; body?: { data?: string; size?: number; attachmentId?: string }; parts?: GmailPart[]; filename?: string };
+
+/** Every attachment in a Gmail `format=full` payload (name, type, size, attachment id). */
+export function gmailStatementParts(payload: GmailPart | undefined): { ref: string; fileName: string; mimeType: string | null; size: number | null }[] {
+  const out: { ref: string; fileName: string; mimeType: string | null; size: number | null }[] = [];
+  const walk = (p: GmailPart) => {
+    if (p.filename && p.body?.attachmentId) out.push({ ref: p.body.attachmentId, fileName: p.filename, mimeType: p.mimeType ?? null, size: p.body.size ?? null });
+    p.parts?.forEach(walk);
+  };
+  if (payload) walk(payload);
+  return out;
+}
 
 /** Gmail `format=full` payload → plain text (text/plain preferred, else HTML converted). */
 export function gmailPayloadText(payload: GmailPart | undefined): string {

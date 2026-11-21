@@ -5,7 +5,8 @@ import type { NextAuthConfig } from "next-auth";
  * The full configuration with providers + Prisma lives in `auth.ts`.
  */
 export const PUBLIC_PATHS = ["/login", "/register", "/forgot-password", "/reset-password", "/verify-email"];
-const PUBLIC_API_PREFIXES = ["/api/auth", "/api/health"];
+// /api/cron is called by Vercel Cron; the route checks CRON_SECRET itself.
+const PUBLIC_API_PREFIXES = ["/api/auth", "/api/health", "/api/cron"];
 
 const sessionHours = Number(process.env.SESSION_MAX_AGE_HOURS ?? 168);
 

@@ -49,6 +49,11 @@ class FakeMailbox implements MailProvider {
     return {
       listBankMessageIds: async () => this.mails.map((m) => m.id).reverse(),
       getMessage: async (id: string) => this.mails.find((m) => m.id === id)!,
+      listStatementMessageIds: async () => [],
+      getStatementMail: async () => {
+        throw new Error("no statements in this mailbox");
+      },
+      downloadAttachment: async () => Buffer.alloc(0),
     };
   }
   add(id: string, text: string, receivedAt = day(0), from = "HDFC Bank InstaAlerts <alerts@hdfcbank.net>", subject = "Alert") {

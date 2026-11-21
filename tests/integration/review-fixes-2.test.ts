@@ -43,7 +43,7 @@ describe("review fixes, fourth pass (integration)", () => {
         return { accessToken: "new", refreshToken: "new-r", expiresAt: new Date(Date.now() + 3600_000) };
       },
       profileEmail: async () => "a@gmail.com", revoke: async () => undefined,
-      client: () => ({ listBankMessageIds: async () => ["m1"], getMessage: async () => ({ id: "m1", threadId: null, from: "alerts@hdfcbank.net", subject: "x", receivedAt: new Date(), text: "Rs.10.00 debited from account **4821" }) }),
+      client: () => ({ listBankMessageIds: async () => ["m1"], getMessage: async () => ({ id: "m1", threadId: null, from: "alerts@hdfcbank.net", subject: "x", receivedAt: new Date(), text: "Rs.10.00 debited from account **4821" }), listStatementMessageIds: async () => [], getStatementMail: async () => { throw new Error("none"); }, downloadAttachment: async () => Buffer.alloc(0) }),
     };
     setMailProviderOverride("GMAIL", fake);
     await expect(syncEmailConnection(userId, conn.id, {}, meta)).rejects.toMatchObject({ code: "DISCONNECTED" });

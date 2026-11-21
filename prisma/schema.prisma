@@ -337,6 +337,14 @@ enum SyncJobStatus {
 enum EmailProvider {
   GMAIL
   OUTLOOK
+  /// Any IMAP mailbox (Gmail, Yahoo, …) connected with an app password.
+  IMAP
+}
+
+enum EmailStatementStatus {
+  PENDING
+  IMPORTED
+  DISMISSED
 }
 
 enum EmailMessageStatus {
@@ -428,6 +436,7 @@ model User {
   growwConnections        GrowwConnection[]
   emailConnections        EmailConnection[]
   emailMessages           EmailMessage[]
+  emailStatements         EmailStatement[]
   emailCandidates         EmailTransactionCandidate[]
   statements              Statement[]
   attachments             Attachment[]
@@ -1444,12 +1453,15 @@ model EmailConnection {
   syncCursor      String?          @db.Text
   lastSyncAt      DateTime?
   lastError       String?
+  /// IMAP only: the mail server (e.g. imap.mail.yahoo.com). The app password is in accessTokenEnc.
+  imapHost        String?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
-  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  syncJobs EmailSyncJob[]
-  messages EmailMessage[]
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  syncJobs   EmailSyncJob[]
+  messages   EmailMessage[]
+  statements EmailStatement[]
 
   @@unique([userId, provider, emailAddress])
   @@map("email_connections")
@@ -1496,6 +1508,38 @@ model EmailMessage {
   @@unique([connectionId, providerMessageId])
   @@index([userId, receivedAt])
   @@map("email_messages")
+}
+
+/// A statement file (PDF / CSV / XLSX) attached to a bank or card email. The file itself
+/// is not stored: it is downloaded from the mailbox again when you import it.
+model EmailStatement {
+  id                String               @id @default(cuid())
+  userId            String
+  connectionId      String
+  providerMessageId String
+  /// Provider's id for the attachment (Gmail attachmentId, Graph attachment id, IMAP part index).
+  attachmentRef     String               @db.Text
+  fileName          String
+  mimeType          String?
+  sizeBytes         Int?
+  fromAddress       String
+  subject           String
+  receivedAt        DateTime
+  /// "bank:<id>" or "card:<id>" when the account could be worked out from the email.
+  suggestedAccount  String?
+  needsPassword     Boolean              @default(false)
+  status            EmailStatementStatus @default(PENDING)
+  importId          String?
+  errorMessage      String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connection EmailConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, providerMessageId, fileName])
+  @@index([userId, status])
+  @@map("email_statements")
 }
 
 model EmailTransactionCandidate {
