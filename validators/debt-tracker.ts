@@ -31,7 +31,7 @@ export type DebtEntryInput = z.input<typeof debtEntrySchema>;
 
 export const debtLenderSchema = z.object({
   name: z.string().trim().min(1, "Enter a name").max(80),
-  kind: z.enum(["PERSON", "OTHER"]).default("PERSON"),
+  kind: z.enum(["PERSON", "OTHER", "COMMITMENT"]).default("PERSON"),
   matchText: optionalText(80),
   openingOutstanding: moneySchema.refine((v) => Number(v) >= 0, "Can't be negative").default("0"),
   openingDate: optionalDate,
@@ -54,15 +54,25 @@ export const debtExcelRowSchema = z.object({
   closingOutstanding: excelAmount,
   interest: excelAmount,
   remainingEmis: z.number().int().min(0).max(600).nullable(),
+  /** What was due that month ("Current month payment" in a financial-year sheet). */
+  amountDue: excelAmount.optional().default(null),
 });
 export type DebtExcelRow = z.output<typeof debtExcelRowSchema>;
 
 export const debtExcelCommitSchema = z.object({
   rows: z.array(debtExcelRowSchema).min(1, "Nothing to import").max(5000, "Too many rows"),
   /** Excel lender name → "card:id" | "loan:id" | "lender:id" | "new" (create an "other lender") | "skip" */
-  mapping: z.record(z.string().max(120), z.string().regex(/^((card|loan|lender):[A-Za-z0-9_-]{1,64}|new|skip)$/)),
+  mapping: z.record(z.string().max(120), z.string().regex(/^((card|loan|lender):[A-Za-z0-9_-]{1,64}|new|commitment|skip)$/)),
   /** Replace figures you already entered for the same lender and month. */
   overwrite: z.boolean().default(false),
+  /** Due day of the month per sheet lender ("2nd of every Month" → 2). */
+  dueDays: z.record(z.string().max(120), z.number().int().min(1).max(31).nullable()).optional().default({}),
+  /** Salary / other income per month from the sheet's summary. */
+  incomes: z
+    .array(z.object({ month: monthParam, salary: excelAmount, otherIncome: excelAmount }))
+    .max(24)
+    .optional()
+    .default([]),
 });
 
 /** A card's bill for one month. An empty total due removes a bill you typed. */

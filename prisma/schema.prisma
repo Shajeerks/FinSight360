@@ -437,6 +437,7 @@ model User {
   emailConnections        EmailConnection[]
   emailMessages           EmailMessage[]
   emailStatements         EmailStatement[]
+  monthIncomes            MonthIncome[]
   emailCandidates         EmailTransactionCandidate[]
   statements              Statement[]
   attachments             Attachment[]
@@ -1691,6 +1692,9 @@ model SystemSetting {
 enum DebtLenderKind {
   PERSON
   OTHER
+  /// A regular monthly payment that isn't a debt (rent, SIP, chit fund…): counted in
+  /// "to pay this month" but never in what you owe.
+  COMMITMENT
 }
 
 enum DebtEntrySource {
@@ -1713,6 +1717,8 @@ model DebtLender {
   openingDate        DateTime?      @db.Date
   /// Interest per month in percent (e.g. 1.5 = 1.5% a month). 0 = interest-free.
   monthlyRatePct     Decimal        @default(0) @db.Decimal(7, 4)
+  /// Day of the month the payment is due (1–31).
+  dueDay             Int?
   notes              String?
   closedAt           DateTime?      @db.Date
   createdAt          DateTime       @default(now())
@@ -1723,6 +1729,24 @@ model DebtLender {
 
   @@index([userId])
   @@map("debt_lenders")
+}
+
+/// Income for a month as you track it (salary + other income), for "can this month's payments be covered".
+model MonthIncome {
+  id          String          @id @default(cuid())
+  userId      String
+  /// First day of the calendar month.
+  month       DateTime        @db.Date
+  salary      Decimal?        @db.Decimal(18, 2)
+  otherIncome Decimal?        @db.Decimal(18, 2)
+  source      DebtEntrySource @default(MANUAL)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, month])
+  @@map("month_incomes")
 }
 
 /// Figures you entered (or imported from Excel) for one lender in one month.
@@ -1743,6 +1767,8 @@ model DebtMonthEntry {
   interest           Decimal?        @db.Decimal(18, 2)
   closingOutstanding Decimal?        @db.Decimal(18, 2)
   remainingEmis      Int?
+  /// Amount to pay this month (e.g. "Current month payment" in your sheet: EMI / minimum / bill).
+  amountDue          Decimal?        @db.Decimal(18, 2)
   /// Payment due date for this month (loans / other lenders; cards use their statement).
   dueDate            DateTime?       @db.Date
   source             DebtEntrySource @default(MANUAL)

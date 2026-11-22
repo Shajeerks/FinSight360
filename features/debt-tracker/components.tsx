@@ -39,7 +39,7 @@ const API_FIELD: Record<FieldKey, string> = {
 export type EditRowData = {
   key: string;
   name: string;
-  kind: "CARD" | "LOAN" | "PERSON" | "OTHER";
+  kind: "CARD" | "LOAN" | "PERSON" | "OTHER" | "COMMITMENT";
   month: string;
   monthLabel: string;
   values: Record<FieldKey, string | null>;
@@ -236,7 +236,7 @@ export function EditEntryDialog({ row }: { row: EditRowData }) {
 
 // ───────────────────────────── other lenders ─────────────────────────────
 
-export type LenderData = { id: string; name: string; kind: "PERSON" | "OTHER"; matchText: string | null; openingOutstanding: string; openingDate: string; monthlyRatePct: string; notes: string | null; closed: boolean };
+export type LenderData = { id: string; name: string; kind: "PERSON" | "OTHER" | "COMMITMENT"; matchText: string | null; openingOutstanding: string; openingDate: string; monthlyRatePct: string; notes: string | null; closed: boolean };
 
 export function LenderDialog({ lender, trigger }: { lender?: LenderData; trigger?: "button" | "icon" }) {
   const router = useRouter();
@@ -280,6 +280,7 @@ export function LenderDialog({ lender, trigger }: { lender?: LenderData; trigger
               <NativeSelect id="dl-kind" value={form.kind} onChange={(e) => set("kind", e.target.value as LenderData["kind"])}>
                 <option value="PERSON">A person (friend / family)</option>
                 <option value="OTHER">Other lender</option>
+                <option value="COMMITMENT">Monthly commitment (rent, SIP, chit…) — not a debt</option>
               </NativeSelect>
             </FormField>
             <FormField id="dl-opening" label="Owed when you started tracking (₹)" error={errors.openingOutstanding}>
@@ -403,8 +404,19 @@ export function AssignEmi({ transactionId, loans }: { transactionId: string; loa
 
 // ───────────────────────────── Excel history ─────────────────────────────
 
-type ExcelRow = { month: string; lender: string; openingOutstanding: string | null; payment: string | null; paidToDate: string | null; closingOutstanding: string | null; interest: string | null; remainingEmis: number | null };
-type ExcelPreview = { rows: ExcelRow[]; sheets: { name: string; month: string | null; rows: number; skipped?: string }[]; lenders: string[]; warnings: string[]; options: { value: string; label: string }[]; suggestions: Record<string, string> };
+type ExcelRow = { month: string; lender: string; openingOutstanding: string | null; payment: string | null; paidToDate: string | null; closingOutstanding: string | null; interest: string | null; remainingEmis: number | null; amountDue?: string | null };
+type ExcelPreview = {
+  rows: ExcelRow[];
+  sheets: { name: string; month: string | null; rows: number; skipped?: string }[];
+  lenders: string[];
+  warnings: string[];
+  options: { value: string; label: string }[];
+  suggestions: Record<string, string>;
+  layout?: "monthly" | "fy";
+  fy?: string;
+  lenderInfo?: Record<string, { type: string | null; dueDay: number | null; suggestedKind: "DEBT" | "COMMITMENT" }>;
+  incomes?: { month: string; salary: string | null; otherIncome: string | null }[];
+};
 
 export function ExcelImportDialog() {
   const router = useRouter();
@@ -441,11 +453,17 @@ export function ExcelImportDialog() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/debt-tracker/excel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows: preview.rows, mapping, overwrite }) });
-      const body = (await res.json().catch(() => null)) as { data?: { saved: number; skipped: number; kept: number; lendersCreated: number }; error?: { message: string } } | null;
+      const res = await fetch("/api/debt-tracker/excel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          rows: preview.rows,
+          mapping,
+          overwrite,
+          dueDays: Object.fromEntries(Object.entries(preview.lenderInfo ?? {}).map(([k, v]) => [k, v.dueDay])),
+          incomes: preview.incomes ?? [],
+        }) });
+      const body = (await res.json().catch(() => null)) as { data?: { saved: number; skipped: number; kept: number; lendersCreated: number; incomes?: number }; error?: { message: string } } | null;
       if (!res.ok || !body?.data) return void setError(body?.error?.message ?? "Import failed.");
       const d = body.data;
-      toast.success(`Imported ${d.saved} month row(s)${d.lendersCreated ? `, added ${d.lendersCreated} lender(s)` : ""}${d.kept ? `, kept ${d.kept} you'd already entered` : ""}.`);
+      toast.success(`Imported ${d.saved} month row(s)${d.lendersCreated ? `, added ${d.lendersCreated} lender(s)` : ""}${d.incomes ? `, income for ${d.incomes} month(s)` : ""}${d.kept ? `, kept ${d.kept} you'd already entered` : ""}.`);
       setOpen(false);
       reset();
       router.refresh();
@@ -460,18 +478,19 @@ export function ExcelImportDialog() {
   return (
     <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset(); }}>
       <Button size="sm" variant="outline" onClick={() => setOpen(true)}><FileSpreadsheet /> Import Excel history</Button>
-      <DialogContent className="sm:max-w-2xl" title="Import your Excel debt sheets" description="One sheet per month with columns like Lender name, Total outstanding, Current month payment, Paid by this month, Remaining balance, Interest, Remaining EMI count. Totals rows are ignored. Nothing is saved until you press Import.">
+      <DialogContent className="sm:max-w-2xl" title="Import your Excel debt sheets" description="Your financial-year sheet (one block of columns per month, as .xlsx or .csv), or one sheet per month with Lender name, Total outstanding, Current month payment, Paid, Remaining balance. Totals rows are ignored. Nothing is saved until you press Import.">
         <div className="grid gap-4">
           {error && <Alert variant="destructive">{error}</Alert>}
           <label htmlFor="de-file" className="flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed bg-muted/30 px-4 py-6 text-center hover:border-primary/50">
             {busy && !preview ? <Loader2 className="size-5 animate-spin text-primary" /> : <FileUp className="size-5 text-primary" />}
-            <span className="text-sm font-medium">{file ? file.name : "Choose your Excel workbook (.xlsx)"}</span>
-            <input id="de-file" type="file" className="sr-only" accept=".xlsx" onChange={(e) => { const f = e.target.files?.[0] ?? null; setFile(f); setPreview(null); if (f) void read(f); }} />
+            <span className="text-sm font-medium">{file ? file.name : "Choose your Excel workbook (.xlsx) or CSV"}</span>
+            <input id="de-file" type="file" className="sr-only" accept=".xlsx,.csv" onChange={(e) => { const f = e.target.files?.[0] ?? null; setFile(f); setPreview(null); if (f) void read(f); }} />
           </label>
           {preview && (
             <>
               <div className="rounded-lg border p-3 text-sm">
-                <p className="font-medium">{preview.rows.length} lender row(s) across {months.length} month(s)</p>
+                <p className="font-medium">{preview.rows.length} lender row(s) across {months.length} month(s){preview.fy ? ` · FY ${preview.fy}` : ""}</p>
+                {preview.incomes && preview.incomes.length > 0 && <p className="text-xs text-muted-foreground">Salary / other income found for {preview.incomes.length} month(s).</p>}
                 <p className="text-xs text-muted-foreground">Sheets: {preview.sheets.map((s) => `${s.name}${s.skipped ? " (skipped)" : ` (${s.rows})`}`).join(" · ")}</p>
                 {preview.warnings.map((w) => <p key={w} className="mt-1 text-xs text-amber-700 dark:text-warning">{w}</p>)}
               </div>
@@ -480,9 +499,17 @@ export function ExcelImportDialog() {
                 <ul className="divide-y rounded-lg border">
                   {preview.lenders.map((name) => (
                     <li key={name} className="flex flex-col gap-2 p-2.5 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="min-w-0 truncate text-sm">{name} <span className="text-xs text-muted-foreground">· {preview.rows.filter((r) => r.lender === name).length} month(s)</span></span>
+                      <span className="min-w-0 truncate text-sm">
+                        {name}{" "}
+                        <span className="text-xs text-muted-foreground">
+                          · {preview.rows.filter((r) => r.lender === name).length} month(s)
+                          {preview.lenderInfo?.[name]?.type ? ` · ${preview.lenderInfo[name].type}` : ""}
+                          {preview.lenderInfo?.[name]?.dueDay ? ` · due ${preview.lenderInfo[name].dueDay}` : ""}
+                        </span>
+                      </span>
                       <NativeSelect aria-label={`Lender for ${name}`} className="h-9 sm:max-w-72" value={mapping[name] ?? "new"} onChange={(e) => setMapping((m) => ({ ...m, [name]: e.target.value }))}>
-                        <option value="new">Add as a new lender</option>
+                        <option value="new">Add as a new lender (debt)</option>
+                        <option value="commitment">Add as a monthly commitment (not a debt)</option>
                         {preview.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                         <option value="skip">Don&apos;t import</option>
                       </NativeSelect>

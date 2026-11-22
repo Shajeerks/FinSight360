@@ -176,7 +176,7 @@ describe("Debt tracker (integration)", () => {
     expect(p.suggestions["Hand loan - Ammu"]).toBe("new");
 
     const r = await commitDebtExcel(userId, { rows: p.rows, mapping: p.suggestions }, meta);
-    expect(r).toEqual({ saved: 4, skipped: 0, kept: 0, lendersCreated: 1 });
+    expect(r).toEqual({ saved: 4, skipped: 0, kept: 0, lendersCreated: 1, incomes: 0 });
 
     const l = await lender(`loan:${loan.id}`);
     const sep = month(l, "2026-09");
@@ -188,7 +188,7 @@ describe("Debt tracker (integration)", () => {
     expect(fixed(month(ammu, "2026-10").opening)).toBe("25000.00");
 
     // Importing again without "replace" keeps what's there
-    expect(await commitDebtExcel(userId, { rows: p.rows, mapping: { ...p.suggestions, "Hand loan - Ammu": "skip" } }, meta)).toEqual({ saved: 0, skipped: 1, kept: 3, lendersCreated: 0 });
+    expect(await commitDebtExcel(userId, { rows: p.rows, mapping: { ...p.suggestions, "Hand loan - Ammu": "skip" } }, meta)).toEqual({ saved: 0, skipped: 1, kept: 3, lendersCreated: 0, incomes: 0 });
     expect(await undoDebtExcel(userId, meta)).toBe(4);
   });
 

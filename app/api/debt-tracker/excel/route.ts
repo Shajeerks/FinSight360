@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * POST /api/debt-tracker/excel
- *  - multipart `file` (.xlsx): read the monthly debt sheets and suggest lenders (nothing saved)
- *  - JSON { rows, mapping, overwrite }: save the checked rows as entered figures
+ *  - multipart `file` (.xlsx / .csv): read the monthly or financial-year debt sheet and suggest lenders (nothing saved)
+ *  - JSON { rows, mapping, overwrite, dueDays, incomes }: save the checked rows as entered figures
  */
 export const POST = apiHandler(async (req) => {
   const { user, meta } = await apiContext();
@@ -31,6 +31,6 @@ export const POST = apiHandler(async (req) => {
   const file = form.get("file");
   if (!(file instanceof File)) throw new AppError("Choose your Excel file.", 400, "NO_FILE", { file: ["Choose a file"] });
   if (file.size > MAX_UPLOAD_BYTES) throw new AppError("Files up to 10 MB are supported.", 413, "FILE_TOO_LARGE");
-  if (!/\.xlsx$/i.test(file.name)) throw new AppError("Save the workbook as .xlsx (Excel Workbook) and upload that.", 400, "BAD_FILE");
-  return ok(await previewDebtExcel(user.id, Buffer.from(await file.arrayBuffer())));
+  if (!/\.(xlsx|csv)$/i.test(file.name)) throw new AppError("Upload the workbook as .xlsx (Excel Workbook), or a CSV of the financial-year sheet.", 400, "BAD_FILE");
+  return ok(await previewDebtExcel(user.id, Buffer.from(await file.arrayBuffer()), file.name));
 });

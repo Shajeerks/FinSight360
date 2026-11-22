@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Debt Tracker" };
 
-const KIND_LABEL = { LOAN: "Loan", CARD: "Card", PERSON: "Person", OTHER: "Other" } as const;
+const KIND_LABEL = { LOAN: "Loan", CARD: "Card", PERSON: "Person", OTHER: "Other", COMMITMENT: "Commitment" } as const;
 const TYPE_LABEL: Record<string, string> = { HOME: "Home loan", CAR: "Car loan", PERSONAL: "Personal loan", EDUCATION: "Education loan", OTHER: "Other loans", CARD: "Credit cards", PERSON: "People", GOLD: "Gold loan", BUSINESS: "Business loan" };
 
 const m0 = (v: Decimal) => formatMoney(v, { decimals: 0 });

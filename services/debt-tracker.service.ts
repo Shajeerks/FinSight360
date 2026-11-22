@@ -26,7 +26,10 @@ import {
   type MonthKey,
   type MonthOverride,
 } from "@/lib/finance/debt-tracker";
-import { readDebtWorkbook } from "@/lib/import/debt-excel";
+import ExcelJS from "exceljs";
+import Papa from "papaparse";
+import { cellValue, readDebtWorkbook } from "@/lib/import/debt-excel";
+import { fyStartFromName, isFySheet, parseFySheet, type FyIncome, type FyLender } from "@/lib/import/debt-fy-sheet";
 import { applyEmiSchema, cardBillSchema, debtEntrySchema, debtExcelCommitSchema, debtLenderSchema, lenderKeySchema, monthParam } from "@/validators/debt-tracker";
 import { recordLoanPayment } from "@/services/loan.service";
 import { syncCardBill } from "@/services/card-bill.service";
@@ -42,7 +45,7 @@ const NO_META: RequestMeta = { ip: null, userAgent: null };
 const ZERO = new Decimal(0);
 const MAX_HISTORY_MONTHS = 120;
 
-export type LenderKind = "CARD" | "LOAN" | "PERSON" | "OTHER";
+export type LenderKind = "CARD" | "LOAN" | "PERSON" | "OTHER" | "COMMITMENT";
 
 export type SourceNote = { kind: "statement" | "ledger" | "schedule" | "bank-match" | "entered" | "rate"; text: string };
 
@@ -83,6 +86,13 @@ export type DueStatus = "PAID" | "MIN_PAID" | "PART_PAID" | "DUE" | "OVERDUE" | 
 export type DueInfo = { dueDate: Date | null; amountDue: Decimal | null; minimumDue: Decimal | null; paid: Decimal; status: DueStatus; source: "statement" | "schedule" | "entered"; label: string };
 
 const fmtDay = (d: Date) => d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: "UTC" });
+const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] ?? "th"}`;
+/** The given day in a month, clamped to its last day (31 → 30 Nov). */
+function dayInMonth(month: MonthKey, day: number): Date {
+  const [y, m] = month.split("-").map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m - 1, Math.min(day, last)));
+}
 
 function dueStatus(i: {
   dueDate: Date | null;
@@ -476,7 +486,7 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
       key,
       name: l.name,
       kind: l.kind,
-      detail: l.kind === "PERSON" ? "Borrowed from a person" : "Other lender",
+      detail: l.kind === "PERSON" ? "Borrowed from a person" : l.kind === "COMMITMENT" ? `Monthly commitment${l.dueDay ? ` · due on the ${ordinal(l.dueDay)}` : ""}` : "Other lender",
       href: null,
       closed: Boolean(l.closedAt),
       months: buildLenderMonths(range, baseOpening, 0, auto, overridesFor(key)),
@@ -498,6 +508,27 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
     }
   }
 
+  // "Amount due" from your sheet (or an earlier month, for regular commitments) gives a due for
+  // months that have none from a statement / schedule; the date comes from the due day.
+  const dueDays = new Map<string, number>();
+  for (const c of cards) if (c.paymentDueDay) dueDays.set(`card:${c.id}`, c.paymentDueDay);
+  for (const l of lenders) if (l.dueDay) dueDays.set(`lender:${l.id}`, l.dueDay);
+  for (const l of out) {
+    const entered = entryMap.get(l.key) ?? new Map<MonthKey, (typeof entries)[number]>();
+    let lastDue: Decimal | null = null;
+    for (const row of l.months) {
+      const e = entered.get(row.month);
+      if (e?.amountDue) lastDue = toDecimal(e.amountDue);
+      const amount = e?.amountDue ? toDecimal(e.amountDue) : l.kind === "COMMITMENT" ? lastDue : null;
+      if (!amount || amount.lessThanOrEqualTo(0)) continue;
+      const existing = l.dues.get(row.month);
+      if (existing && existing.amountDue) continue;
+      const day = dueDays.get(l.key);
+      const dueDate = e?.dueDate ?? existing?.dueDate ?? (day ? dayInMonth(row.month, day) : null);
+      l.dues.set(row.month, dueStatus({ dueDate, amountDue: amount, minimumDue: null, paid: Decimal.max(existing?.paid ?? ZERO, row.payment), today, source: "entered", label: l.kind === "COMMITMENT" ? "Monthly payment" : "Due (your figure)" }));
+    }
+  }
+
   // Lenders in entries whose card/loan/lender was deleted are dropped (their entries stay, harmless).
   const firstMonth = out.flatMap((l) => l.months.filter((r) => !isEmptyRow(r)).map((r) => r.month)).sort()[0] ?? current;
 
@@ -510,6 +541,7 @@ export async function buildDebtTracker(userId: string, timezone = DEFAULT_TIMEZO
   const loanStatus = new Map(loans.map((l) => [`loan:${l.id}`, l.status]));
   const cardStatus = new Map(cards.map((c) => [`card:${c.id}`, c.status]));
   const closedLenders = out
+    .filter((l) => l.kind !== "COMMITMENT")
     .map((l) => {
       const s = settlementOf(l.months, { explicitlyClosed: l.closed, zeroCountsAsSettled: l.kind === "CARD" });
       if (!s.settled) return null;
@@ -548,8 +580,14 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
   const selected = m < t.firstMonth ? t.firstMonth : m;
   const prevKey = nextMonth(selected, -1);
   const settledKeys = new Set(t.closedLenders.map((c) => c.key));
+  // Monthly commitments (rent, SIP…) are shown on their own and never counted as debt.
+  const debts = t.lenders.filter((l) => l.kind !== "COMMITMENT");
+  const commitments = t.lenders
+    .filter((l) => l.kind === "COMMITMENT")
+    .map((l) => ({ key: l.key, name: l.name, detail: l.detail, row: l.months.find((r) => r.month === selected) ?? null, due: l.dues.get(selected) ?? null }))
+    .filter((c) => c.due || (c.row && !isEmptyRow(c.row)));
 
-  const rows = t.lenders
+  const rows = debts
     .map((l) => {
       const row = l.months.find((r) => r.month === selected);
       if (!row || isEmptyRow(row)) return null;
@@ -594,7 +632,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
   const trendMonths = monthsBetween(nextMonth(selected, -11) < t.firstMonth ? t.firstMonth : nextMonth(selected, -11), selected);
   const trend = trendMonths.map((k) => {
     let closing = ZERO, interest = ZERO, payment = ZERO, principal = ZERO;
-    for (const l of t.lenders) {
+    for (const l of debts) {
       const r = l.months.find((x) => x.month === k);
       if (!r) continue;
       closing = closing.plus(r.closing);
@@ -608,7 +646,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
   // Financial year (April–March) of the selected month: interest by lender and by loan type.
   const fy = financialYearOf(selected);
   const fyMonths = monthsBetween(`${fy}-04`, selected);
-  const fyByLender = t.lenders
+  const fyByLender = debts
     .map((l) => {
       const ms = l.months.filter((r) => fyMonths.includes(r.month));
       return { key: l.key, name: l.name, kind: l.kind, interest: roundMoney(sum(ms.map((r) => r.interest))), payment: roundMoney(sum(ms.map((r) => r.payment))) };
@@ -618,7 +656,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
   const loanTypes = await prisma.loan.findMany({ where: { userId, deletedAt: null }, select: { id: true, loanType: true } });
   const typeOf = new Map(loanTypes.map((l) => [`loan:${l.id}`, l.loanType]));
   const fyByType = new Map<string, { interest: Decimal; principal: Decimal }>();
-  for (const l of t.lenders) {
+  for (const l of debts) {
     const group = l.kind === "LOAN" ? `${typeOf.get(l.key) ?? "OTHER"}` : l.kind;
     for (const r of l.months.filter((x) => fyMonths.includes(x.month))) {
       const g = fyByType.get(group) ?? { interest: ZERO, principal: ZERO };
@@ -628,7 +666,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
     }
   }
 
-  const prevRows = t.lenders.map((l) => l.months.find((r) => r.month === prevKey)).filter(Boolean) as DebtMonthRow[];
+  const prevRows = debts.map((l) => l.months.find((r) => r.month === prevKey)).filter(Boolean) as DebtMonthRow[];
   const prevClosing = roundMoney(sum(prevRows.map((r) => r.closing)));
   const months = monthsBetween(t.firstMonth, t.current).reverse();
 
@@ -650,6 +688,7 @@ export async function getDebtTrackerMonth(userId: string, month: string | null |
     unmatchedEmis: t.unmatchedEmis.filter((e) => monthKey(e.date) === selected),
     loans: t.loans,
     closedLenders: t.closedLenders,
+    commitments,
     // Rows from uploaded statements still waiting in the Review Queue don't count until approved.
     pendingReview: await prisma.transaction.count({
       where: {
@@ -858,12 +897,69 @@ function normalise(s: string) {
   return s.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
 }
 
-/** Read the workbook and suggest which lender each Excel name is. Nothing is saved. */
-export async function previewDebtExcel(userId: string, buffer: Buffer) {
-  let parsed;
+/** The financial year (April start) that `d` falls in. */
+function currentFyStart(d = new Date()) {
+  return d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+}
+
+type Grid = unknown[][];
+function gridOf(ws: ExcelJS.Worksheet): Grid {
+  const out: Grid = [];
+  for (let r = 1; r <= ws.rowCount; r++) {
+    const values = ws.getRow(r).values as ExcelJS.CellValue[];
+    out.push(Array.isArray(values) ? values.slice(1).map((v) => cellValue(v)) : []);
+  }
+  return out;
+}
+
+/**
+ * Read the workbook (or CSV) and suggest which lender each sheet name is. Nothing is saved.
+ * Two layouts are understood: one sheet per month, and a financial-year sheet with one
+ * block of columns per month (the latest financial year in the workbook is used).
+ */
+export async function previewDebtExcel(userId: string, buffer: Buffer, fileName = "") {
+  let parsed: Awaited<ReturnType<typeof readDebtWorkbook>> & { layout: "monthly" | "fy"; fy?: string; lenderInfo?: Record<string, FyLender>; incomes?: FyIncome[] };
+  const isZip = buffer.length > 3 && buffer[0] === 0x50 && buffer[1] === 0x4b;
+  const fromFy = (grid: Grid, fyStart: number, sheets: { name: string; month: string | null; rows: number; skipped?: string }[]) => {
+    const fy = parseFySheet(grid, fyStart);
+    return {
+      layout: "fy" as const,
+      fy: fy.fy,
+      rows: fy.rows,
+      sheets,
+      lenders: fy.lenders.map((l) => l.name),
+      warnings: fy.warnings,
+      lenderInfo: Object.fromEntries(fy.lenders.map((l) => [l.name, l])),
+      incomes: fy.incomes,
+    };
+  };
   try {
-    parsed = await readDebtWorkbook(buffer);
-  } catch {
+    if (!isZip) {
+      const grid = Papa.parse<string[]>(buffer.toString("utf8"), { skipEmptyLines: false }).data;
+      if (!isFySheet(grid)) throw new AppError("Upload the Excel workbook (.xlsx), or a CSV of the financial-year sheet.", 400, "BAD_FILE");
+      const fyStart = fyStartFromName(fileName) ?? currentFyStart();
+      parsed = fromFy(grid, fyStart, [{ name: fileName || "CSV", month: null, rows: 0 }]);
+      parsed.sheets[0].rows = parsed.rows.length;
+    } else {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buffer as unknown as ArrayBuffer);
+      const fySheets: { name: string; fyStart: number; grid: Grid }[] = [];
+      wb.eachSheet((ws) => {
+        if (ws.state && ws.state !== "visible") return;
+        const grid = gridOf(ws);
+        if (isFySheet(grid)) fySheets.push({ name: ws.name, fyStart: fyStartFromName(ws.name) ?? currentFyStart(), grid });
+      });
+      if (fySheets.length) {
+        const latest = fySheets.reduce((a, b) => (b.fyStart > a.fyStart ? b : a));
+        const sheets = fySheets.map((x) => ({ name: x.name, month: null, rows: 0, ...(x === latest ? {} : { skipped: "older financial year" }) }));
+        parsed = fromFy(latest.grid, latest.fyStart, sheets);
+        sheets.find((x) => x.name === latest.name)!.rows = parsed.rows.length;
+      } else {
+        parsed = { ...(await readDebtWorkbook(buffer)), layout: "monthly" };
+      }
+    }
+  } catch (e) {
+    if (e instanceof AppError) throw e;
     throw new AppError("This doesn't look like an Excel (.xlsx) file. Save it as .xlsx and try again.", 400, "BAD_FILE");
   }
   if (!parsed.rows.length) {
@@ -872,25 +968,30 @@ export async function previewDebtExcel(userId: string, buffer: Buffer) {
   const [cards, loans, lenders] = await Promise.all([
     prisma.creditCard.findMany({ where: { userId, deletedAt: null }, select: { id: true, bankName: true, cardName: true, last4: true } }),
     prisma.loan.findMany({ where: { userId, deletedAt: null }, select: { id: true, lender: true, name: true, accountLast4: true } }),
-    prisma.debtLender.findMany({ where: { userId, deletedAt: null }, select: { id: true, name: true } }),
+    prisma.debtLender.findMany({ where: { userId, deletedAt: null }, select: { id: true, name: true, kind: true } }),
   ]);
   const options = [
     ...loans.map((l) => ({ value: `loan:${l.id}`, label: `Loan · ${l.lender === l.name ? l.name : `${l.lender} — ${l.name}`}`, words: keywords(l.lender, l.name, l.accountLast4), full: normalise(`${l.lender} ${l.name}`) })),
     ...cards.map((c) => ({ value: `card:${c.id}`, label: `Card · ${c.bankName} ${c.cardName} ••${c.last4}`, words: keywords(c.bankName, c.cardName, c.last4), full: normalise(`${c.bankName} ${c.cardName}`) })),
-    ...lenders.map((l) => ({ value: `lender:${l.id}`, label: `Other · ${l.name}`, words: keywords(l.name), full: normalise(l.name) })),
+    ...lenders.map((l) => ({ value: `lender:${l.id}`, label: `${l.kind === "COMMITMENT" ? "Commitment" : "Other"} · ${l.name}`, words: keywords(l.name), full: normalise(l.name) })),
   ];
   const suggestions: Record<string, string> = {};
   for (const name of parsed.lenders) {
+    const commitment = parsed.lenderInfo?.[name]?.suggestedKind === "COMMITMENT";
+    // The sheet's Type column narrows the match: a card only matches your cards, a loan your loans / lenders.
+    const type = parsed.lenderInfo?.[name]?.type ?? "";
+    const allowed = (value: string) => (/card/i.test(type) ? value.startsWith("card:") : /loan|pl\b/i.test(type) ? !value.startsWith("card:") : true);
     const n = normalise(name);
     const words = keywords(name);
     let best: { value: string; score: number } | null = null;
     for (const o of options) {
+      if (!allowed(o.value)) continue;
       let score = o.full === n ? 100 : 0;
       const hits = words.filter((w) => o.words.includes(w)).length;
       score = Math.max(score, hits ? (hits / Math.max(words.length, 1)) * 60 + hits * 10 : 0);
       if (score > (best?.score ?? 0)) best = { value: o.value, score };
     }
-    suggestions[name] = best && best.score >= 30 ? best.value : "new";
+    suggestions[name] = best && best.score >= 30 && (!commitment || best.value.startsWith("lender:")) ? best.value : commitment ? "commitment" : "new";
   }
   return { ...parsed, options: options.map(({ value, label }) => ({ value, label })), suggestions };
 }
@@ -903,12 +1004,21 @@ export async function commitDebtExcel(userId: string, input: unknown, meta: Requ
     for (const name of new Set(d.rows.map((r) => r.lender))) {
       const target = d.mapping[name] ?? "skip";
       if (target === "skip") resolved.set(name, null);
-      else if (target === "new") {
-        const l = await tx.debtLender.create({ data: { userId, name: name.slice(0, 80), kind: "OTHER", notes: "Added from Excel import" } });
+      else if (target === "new" || target === "commitment") {
+        const l = await tx.debtLender.create({
+          data: { userId, name: name.slice(0, 80), kind: target === "commitment" ? "COMMITMENT" : "OTHER", dueDay: d.dueDays[name] ?? null, notes: "Added from Excel import" },
+        });
         lendersCreated++;
         resolved.set(name, { key: `lender:${l.id}`, name: l.name });
       } else {
         resolved.set(name, { key: target, name: await lenderName(tx, userId, target) });
+        // The sheet's due day fills in a card's / lender's due day if it isn't set yet.
+        const day = d.dueDays[name];
+        if (day) {
+          const [kind, id] = target.split(":");
+          if (kind === "card") await tx.creditCard.updateMany({ where: { id, userId, paymentDueDay: null }, data: { paymentDueDay: day } });
+          if (kind === "lender") await tx.debtLender.updateMany({ where: { id, userId, dueDay: null }, data: { dueDay: day } });
+        }
       }
     }
     let saved = 0, skipped = 0, kept = 0;
@@ -933,6 +1043,7 @@ export async function commitDebtExcel(userId: string, input: unknown, meta: Requ
         closingOutstanding: r.closingOutstanding === null ? null : toDecimal(r.closingOutstanding),
         interest: r.interest === null ? null : toDecimal(r.interest),
         remainingEmis: r.remainingEmis,
+        amountDue: r.amountDue === null || r.amountDue === undefined ? null : toDecimal(r.amountDue),
         newBorrowing: null,
         source: "EXCEL" as const,
         notes: `From Excel (${r.lender})`,
@@ -940,14 +1051,24 @@ export async function commitDebtExcel(userId: string, input: unknown, meta: Requ
       await tx.debtMonthEntry.upsert({ where, update: values, create: { userId, month, lenderKey: target.key, ...values } });
       saved++;
     }
-    await audit({ userId, action: AuditAction.DEBT_EXCEL_IMPORTED, entityType: "DebtMonthEntry", ip: meta.ip, userAgent: meta.userAgent, metadata: { saved, skipped, kept, lendersCreated } }, tx);
-    return { saved, skipped, kept, lendersCreated };
+    let incomes = 0;
+    for (const inc of d.incomes) {
+      const month = monthStart(inc.month);
+      const existing = await tx.monthIncome.findUnique({ where: { userId_month: { userId, month } } });
+      if (existing && !d.overwrite) continue;
+      const values = { salary: inc.salary === null ? null : toDecimal(inc.salary), otherIncome: inc.otherIncome === null ? null : toDecimal(inc.otherIncome), source: "EXCEL" as const };
+      await tx.monthIncome.upsert({ where: { userId_month: { userId, month } }, update: values, create: { userId, month, ...values } });
+      incomes++;
+    }
+    await audit({ userId, action: AuditAction.DEBT_EXCEL_IMPORTED, entityType: "DebtMonthEntry", ip: meta.ip, userAgent: meta.userAgent, metadata: { saved, skipped, kept, lendersCreated, incomes } }, tx);
+    return { saved, skipped, kept, lendersCreated, incomes };
   });
 }
 
 /** Remove everything imported from Excel (your hand-entered figures stay). */
 export async function undoDebtExcel(userId: string, meta: RequestMeta = NO_META) {
   const res = await prisma.debtMonthEntry.deleteMany({ where: { userId, source: "EXCEL" } });
+  await prisma.monthIncome.deleteMany({ where: { userId, source: "EXCEL" } });
   await audit({ userId, action: AuditAction.DEBT_EXCEL_IMPORTED, entityType: "DebtMonthEntry", ip: meta.ip, userAgent: meta.userAgent, metadata: { removed: res.count } });
   return res.count;
 }

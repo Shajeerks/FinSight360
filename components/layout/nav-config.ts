@@ -16,6 +16,7 @@ import {
   FileText,
   Settings,
   Scale,
+  CalendarCheck,
   type LucideIcon,
 } from "lucide-react";
 
@@ -27,6 +28,7 @@ export const NAV_SECTIONS: NavSection[] = [
     title: "Overview",
     items: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/plan", label: "Pay & Close", icon: CalendarCheck },
       { href: "/analytics", label: "Monthly Analysis", icon: BarChart3 },
     ],
   },
@@ -70,8 +72,8 @@ export const NAV_SECTIONS: NavSection[] = [
 /** Primary destinations in the iPhone bottom bar (the rest live under "More"). */
 export const MOBILE_PRIMARY: NavItem[] = [
   { href: "/dashboard", label: "Home", icon: LayoutDashboard },
+  { href: "/plan", label: "Pay", icon: CalendarCheck },
   { href: "/transactions", label: "Activity", icon: ArrowLeftRight },
-  { href: "/credit-cards", label: "Cards", icon: CreditCard },
   { href: "/loans", label: "Loans", icon: HandCoins },
 ];
 

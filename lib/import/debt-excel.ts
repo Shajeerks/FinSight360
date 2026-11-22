@@ -24,7 +24,7 @@ const HEADERS: { field: Field; test: (h: string) => boolean }[] = [
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-function cellValue(v: ExcelJS.CellValue): unknown {
+export function cellValue(v: ExcelJS.CellValue): unknown {
   if (v && typeof v === "object" && !(v instanceof Date)) {
     if ("result" in v) return (v as { result: unknown }).result;
     if ("richText" in v) return (v as ExcelJS.CellRichTextValue).richText.map((t) => t.text).join("");
@@ -132,6 +132,7 @@ export async function readDebtWorkbook(buffer: Buffer): Promise<DebtExcelPreview
         closingOutstanding: excelMoney(get("closing")),
         interest: excelMoney(get("interest")),
         remainingEmis: emiNum !== null && Number(emiNum) >= 0 && Number(emiNum) <= 600 ? Math.round(Number(emiNum)) : null,
+        amountDue: null,
       };
       if ([out.openingOutstanding, out.payment, out.paidToDate, out.closingOutstanding, out.interest].every((v) => v === null)) continue;
       rows.push(out);
