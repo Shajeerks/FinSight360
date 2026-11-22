@@ -76,3 +76,25 @@ export async function setLoanProgressAction(loanId: string, input: unknown): Pro
   if (res.ok) refresh(loanId);
   return res;
 }
+
+export async function linkTransactionToLoanAction(input: { transactionId: string; loanId: string; scheduleId?: string | null; paymentType?: string }): Promise<ActionResult> {
+  const { user, meta } = await ctx();
+  const { linkTransactionToLoan } = await import("@/services/loan-match.service");
+  const res = await runAction(async () => void (await linkTransactionToLoan(user.id, input, meta)), "Payment linked to the loan.");
+  if (res.ok) {
+    refresh(input.loanId);
+    revalidatePath("/debt-tracker");
+  }
+  return res;
+}
+
+export async function autoLinkLoanPaymentsAction(): Promise<ActionResult<{ linked: number; suggestions: number }>> {
+  const { user, meta } = await ctx();
+  const { autoLinkLoanPayments } = await import("@/services/loan-match.service");
+  const res = await runAction(() => autoLinkLoanPayments(user.id, {}, meta));
+  if (res.ok) {
+    refresh();
+    revalidatePath("/debt-tracker");
+  }
+  return res;
+}

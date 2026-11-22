@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Receipt, Lock, Sparkles } from "lucide-react";
 import { requireUser } from "@/lib/auth/session";
+import { getLoanLinkOptions } from "@/services/loan-match.service";
 import { pageNumber } from "@/validators/common";
 import { resolvePageMonth } from "@/lib/page-month";
 import { formatMoney } from "@/lib/money";
@@ -23,7 +24,7 @@ export default async function ExpensesPage({ searchParams }: PageProps<"/expense
   const sp = await searchParams;
   const { ym, now } = await resolvePageMonth(user.id, sp.month);
   const page = pageNumber(sp.page);
-  const [o, options] = await Promise.all([getExpenseOverview(user.id, ym, page), getTransactionFormOptions(user.id)]);
+  const [o, options, loans] = await Promise.all([getExpenseOverview(user.id, ym, page), getTransactionFormOptions(user.id), getLoanLinkOptions(user.id)]);
   const add = <AddTransactionButton options={options} kind="EXPENSE" label="Add Expense" />;
   const { start, end } = monthRange(ym);
   const from = start.toISOString().slice(0, 10);
@@ -94,7 +95,7 @@ export default async function ExpensesPage({ searchParams }: PageProps<"/expense
         </Card>
       </div>
 
-      <TransactionList rows={o.list.rows} options={options} emptyTitle="No expenses this month" emptyDescription="Add an expense or upload a statement." emptyAction={add} />
+      <TransactionList rows={o.list.rows} options={options} loans={loans} emptyTitle="No expenses this month" emptyDescription="Add an expense or upload a statement." emptyAction={add} />
       <Pagination page={o.list.page} pages={o.list.pages} total={o.list.total} makeHref={(p) => `/expenses?month=${formatYearMonth(ym)}&page=${p}`} />
     </div>
   );

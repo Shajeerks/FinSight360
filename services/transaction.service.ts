@@ -365,6 +365,7 @@ const listInclude = {
   income: { select: { incomeCategory: true, sourceName: true, isRecurring: true } },
   expense: { select: { paymentMethod: true, isRecurring: true } },
   _count: { select: { sources: true } },
+  loanPayment: { select: { id: true, deletedAt: true, loan: { select: { id: true, name: true, lender: true, deletedAt: true } } } },
 } satisfies Prisma.TransactionInclude;
 
 export function buildTransactionWhere(userId: string, f: Partial<TransactionFilters>): Prisma.TransactionWhereInput {

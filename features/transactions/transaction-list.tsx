@@ -8,6 +8,7 @@ import { formatDate } from "@/lib/dates";
 import { SOURCE_LABELS, TYPE_LABELS } from "@/lib/transactions/kinds";
 import type { TransactionFormOptions, TransactionRow } from "@/services/transaction.service";
 import { TransactionRowActions } from "@/features/transactions/transaction-dialog";
+import { LinkToLoanButton, type LoanChoice } from "@/features/loans/link-loan-payment";
 import { cn } from "@/lib/utils";
 
 function accountLabel(t: TransactionRow) {
@@ -36,9 +37,23 @@ function Amount({ t }: { t: TransactionRow }) {
   );
 }
 
+const LINKABLE = new Set(["EMI", "EXPENSE", "OTHER", "TRANSFER", "FEE"]);
+const activeLoanPayment = (t: TransactionRow) => (t.loanPayment && !t.loanPayment.deletedAt && !t.loanPayment.loan.deletedAt ? t.loanPayment : null);
+/** A bank / cash debit that isn't a loan payment yet can be linked to a loan. */
+function canLinkToLoan(t: TransactionRow) {
+  return t.direction === "DEBIT" && Boolean(t.bankAccount || t.cashAccount) && !t.creditCard && !t.transferGroupId && LINKABLE.has(t.transactionType) && t.status === "CONFIRMED" && !t.duplicateOfId && !activeLoanPayment(t);
+}
+const txnForLink = (t: TransactionRow) => ({ id: t.id, date: t.transactionDate.toISOString().slice(0, 10), amount: t.amount.toFixed(2), description: t.description });
+
 function Flags({ t }: { t: TransactionRow }) {
+  const lp = activeLoanPayment(t);
   return (
     <>
+      {lp && (
+        <Link href={`/loans/${lp.loan.id}`}>
+          <Badge variant="success">Loan payment · {lp.loan.lender === lp.loan.name ? lp.loan.name : `${lp.loan.lender} ${lp.loan.name}`}</Badge>
+        </Link>
+      )}
       {t.status === "PENDING_REVIEW" && <Badge variant="warning">Needs review</Badge>}
       {t.status === "REJECTED" && <Badge variant="secondary">Rejected</Badge>}
       {t.duplicateStatus === "POSSIBLE_DUPLICATE" && <Badge variant="warning"><Copy /> Possible duplicate</Badge>}
@@ -68,9 +83,12 @@ export function TransactionList({
   emptyTitle = "No transactions yet",
   emptyDescription = "Add your first transaction, or adjust the filters.",
   emptyAction,
+  loans = [],
 }: {
   rows: TransactionRow[];
   options: TransactionFormOptions;
+  /** Active loans with unpaid instalments — enables "Link to loan" on bank debits. */
+  loans?: LoanChoice[];
   emptyTitle?: string;
   emptyDescription?: string;
   emptyAction?: React.ReactNode;
@@ -89,7 +107,7 @@ export function TransactionList({
               <th className="px-4 py-3 font-medium">Category</th>
               <th className="px-4 py-3 font-medium">Account</th>
               <th className="px-4 py-3 text-right font-medium">Amount</th>
-              <th className="w-24 px-2 py-3"><span className="sr-only">Actions</span></th>
+              <th className="w-32 px-2 py-3"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody className="divide-y">
@@ -116,7 +134,12 @@ export function TransactionList({
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{accountLabel(t)}</td>
                 <td className="px-4 py-3 text-right"><Amount t={t} /></td>
-                <td className="px-2 py-2"><TransactionRowActions id={t.id} options={options} label={t.description} /></td>
+                <td className="px-2 py-2">
+                  <div className="flex items-center justify-end">
+                    {canLinkToLoan(t) && <LinkToLoanButton txn={txnForLink(t)} loans={loans} compact />}
+                    <TransactionRowActions id={t.id} options={options} label={t.description} />
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -139,7 +162,10 @@ export function TransactionList({
               <p className="truncate text-xs text-muted-foreground">{accountLabel(t)}</p>
               <div className="mt-1 flex flex-wrap items-center justify-between gap-1">
                 <div className="flex flex-wrap gap-1"><Flags t={t} /></div>
-                <TransactionRowActions id={t.id} options={options} label={t.description} />
+                <div className="flex items-center">
+                  {canLinkToLoan(t) && <LinkToLoanButton txn={txnForLink(t)} loans={loans} compact />}
+                  <TransactionRowActions id={t.id} options={options} label={t.description} />
+                </div>
               </div>
             </div>
           </li>

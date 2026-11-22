@@ -14,6 +14,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { StatCard } from "@/features/dashboard/components/stat-card";
 import { AddLoanDialog, LOAN_TYPE_LABEL } from "@/features/loans/loan-forms";
 import { PrincipalInterestBars } from "@/features/loans/loan-charts";
+import { LoanPaymentSuggestionsCard } from "@/features/loans/loan-payment-suggestions-card";
 
 export const metadata: Metadata = { title: "Loans & EMI" };
 
@@ -37,6 +38,8 @@ export default async function LoansPage() {
             <StatCard title="Interest paid this year" value={formatMoney(t.interestPaidThisYear, { decimals: 0 })} icon={TrendingDown} sub={`This month ${formatMoney(t.interestPaidThisMonth, { decimals: 0 })}`} />
             <StatCard title="Future interest (estimated)" value={formatMoney(t.futureInterest, { decimals: 0 })} icon={CalendarClock} sub="If you pay as scheduled" />
           </section>
+
+          <LoanPaymentSuggestionsCard userId={user.id} />
 
           <Card>
             <CardHeader>

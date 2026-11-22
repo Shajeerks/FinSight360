@@ -8,6 +8,7 @@ import { parseTransactionFilters } from "@/validators/transactions";
 import { TransactionFiltersBar } from "@/features/transactions/transaction-filters";
 import { Pagination, TransactionList } from "@/features/transactions/transaction-list";
 import { AddTransactionButton } from "@/features/transactions/transaction-dialog";
+import { getLoanLinkOptions } from "@/services/loan-match.service";
 
 export const metadata: Metadata = { title: "Transactions" };
 
@@ -15,7 +16,7 @@ export default async function TransactionsPage({ searchParams }: PageProps<"/tra
   const user = await requireUser();
   const sp = await searchParams;
   const filters = parseTransactionFilters(sp);
-  const [list, options] = await Promise.all([listTransactions(user.id, filters), getTransactionFormOptions(user.id)]);
+  const [list, options, loans] = await Promise.all([listTransactions(user.id, filters), getTransactionFormOptions(user.id), getLoanLinkOptions(user.id)]);
   const net = list.totals.credit.minus(list.totals.debit);
 
   const makeHref = (page: number) => {
@@ -39,7 +40,7 @@ export default async function TransactionsPage({ searchParams }: PageProps<"/tra
         <Card><CardContent className="p-3 sm:p-4"><p className="text-xs text-muted-foreground">Net</p><p className="tabular text-sm font-semibold sm:text-lg">{formatMoney(net, { decimals: 0 })}</p></CardContent></Card>
       </div>
       <p className="-mt-2 text-xs text-muted-foreground">Totals include transfers and card payments in the filter, and exclude duplicates, rejected and pending items.</p>
-      <TransactionList rows={list.rows} options={options} emptyAction={<AddTransactionButton options={options} label="Add Transaction" variant="outline" />} />
+      <TransactionList rows={list.rows} options={options} loans={loans} emptyAction={<AddTransactionButton options={options} label="Add Transaction" variant="outline" />} />
       <Pagination page={list.page} pages={list.pages} total={list.total} makeHref={makeHref} />
     </div>
   );

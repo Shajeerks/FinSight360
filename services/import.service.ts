@@ -1,6 +1,7 @@
 import "server-only";
 import type { AmountMode, ImportRowStatus, Prisma, SourceType, TransactionType } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { logger } from "@/lib/logger";
 import { assertIds, parseOrThrow } from "@/lib/api";
 import { audit, AuditAction } from "@/lib/audit";
 import { AppError, NotFoundError } from "@/lib/errors";
@@ -528,6 +529,9 @@ export async function cancelImport(userId: string, importId: string, meta: Reque
 
 export type ImportSummary = {
   created: number; linked: number; possibleDuplicates: number; pendingReview: number; skipped: number; invalid: number; openingBalanceSet?: string;
+  /** Bank statements: EMI debits linked to their loans automatically, and others that look like EMIs (to link by hand). */
+  loanPaymentsLinked?: number;
+  loanPaymentSuggestions?: number;
   /** Card statements: the bill read from the PDF. */
   cardBill?: { statementDate: string | null; dueDate: string | null; totalDue: string | null; minimumDue: string | null; appliedToCard: boolean };
 };
@@ -550,6 +554,21 @@ function billColumns(b: CardBill | null) {
  */
 export async function commitImport(userId: string, importId: string, meta: RequestMeta = NO_META): Promise<ImportSummary> {
   const summary = await commitImportTx(userId, importId, meta);
+  // EMIs paid from this bank account: link the clear ones to their loans straight away.
+  try {
+    const imp = await prisma.transactionImport.findFirst({ where: { id: importId, userId }, select: { bankAccountId: true, completedAt: true } });
+    if (imp?.bankAccountId) {
+      const rows = await prisma.transactionImportRow.findMany({ where: { importId, matchedTransactionId: { not: null } }, select: { matchedTransactionId: true } });
+      const created = await prisma.transactionSource.findMany({ where: { importId }, select: { transactionId: true } });
+      const ids = [...new Set([...rows.map((r) => r.matchedTransactionId!), ...created.map((c) => c.transactionId)])];
+      const { autoLinkLoanPayments } = await import("@/services/loan-match.service");
+      const r = await autoLinkLoanPayments(userId, { transactionIds: ids }, meta);
+      summary.loanPaymentsLinked = r.linked;
+      summary.loanPaymentSuggestions = r.suggestions;
+    }
+  } catch (error) {
+    logger.warn("import_loan_autolink_failed", { error });
+  }
   if (summary.possibleDuplicates || summary.pendingReview) {
     const { notify } = await import("@/services/notification.service");
     await notify(userId, {

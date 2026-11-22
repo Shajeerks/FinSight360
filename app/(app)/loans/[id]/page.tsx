@@ -17,6 +17,7 @@ import { StatCard } from "@/features/dashboard/components/stat-card";
 import { EditLoanDialog, LOAN_TYPE_LABEL, LoanProgressDialog, RecordLoanPaymentDialog, ReviseRateDialog } from "@/features/loans/loan-forms";
 import { DeleteLoanButton, DeleteLoanPaymentButton } from "@/features/loans/loan-buttons";
 import { BalanceCurve, PrincipalInterestBars } from "@/features/loans/loan-charts";
+import { LoanPaymentSuggestionsCard } from "@/features/loans/loan-payment-suggestions-card";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Loan details" };
@@ -97,6 +98,8 @@ export default async function LoanDetailPage({ params, searchParams }: PageProps
           <div><p className="text-xs text-muted-foreground">Projected closure</p><p className="flex items-center gap-1 text-lg font-semibold"><CalendarCheck className="size-4 text-primary" /> {a.projectedClosure ? formatDate(a.projectedClosure) : "—"}</p></div>
         </CardContent>
       </Card>
+
+      {active && <LoanPaymentSuggestionsCard userId={user.id} loanId={loan.id} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
